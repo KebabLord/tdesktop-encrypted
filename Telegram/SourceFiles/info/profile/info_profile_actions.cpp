@@ -2708,7 +2708,7 @@ void ActionsFiller::addBlockAction(not_null<UserData*> user) {
 }
 
 void ActionsFiller::addSecretChatAction(not_null<UserData*> user) {
-	// 1. Buton Metni
+	// Start Secret Chat Button
 	auto text = rpl::single(QString("Start Secret Chat"));
 	const auto controller = _controller->parentController();
 
@@ -2717,8 +2717,8 @@ void ActionsFiller::addSecretChatAction(not_null<UserData*> user) {
 			.text = QString("Are you sure you want to start a secret chat?"),
 			.confirmed = [=](Fn<void()>&& close) {
 				close(); 
-
-				controller->showToast("A private chat request has been sent");
+				LOG(("1337 SecretChat: UI requested start for userId=%1.").arg(user->id.value));
+				//controller->showToast("A private chat request has been sent");
 
 			},
 			.confirmText = QString("Start"),

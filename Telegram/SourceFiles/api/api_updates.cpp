@@ -2009,15 +2009,23 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 	} break;
 
 	case mtpc_updateNewEncryptedMessage: {
+        LOG(("1335 SecretChat: updateEncryption received."));
 	} break;
 
 	case mtpc_updateEncryptedChatTyping: {
+        LOG(("1336 SecretChat: updateEncryption received."));
 	} break;
 
-	case mtpc_updateEncryption: {
-	} break;
+case mtpc_updateEncryption: {
+    //const auto &d = update.c_updateEncryption();
+    // d.vchat() is EncryptedChat
+    LOG(("1337 SecretChat: updateEncryption received."));
+    // We'll print exact fields after we see how EncryptedChat is represented in this codebase.
+} break;
 
 	case mtpc_updateEncryptedMessagesRead: {
+    LOG(("1338 SecretChat: updateEncryption received."));
+
 	} break;
 
 	case mtpc_updatePhoneCall:
