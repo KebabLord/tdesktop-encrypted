@@ -2016,12 +2016,78 @@ void Updates::feedUpdate(const MTPUpdate &update) {
         LOG(("1336 SecretChat: updateEncryption received."));
 	} break;
 
+/* OLD UPDATE ENCRYPTION CODE THAT EXECUTED WHEN WE RECEIVE A SECRET CHAT REQUEST
 case mtpc_updateEncryption: {
     //const auto &d = update.c_updateEncryption();
     // d.vchat() is EncryptedChat
     LOG(("1337 SecretChat: updateEncryption received."));
     // We'll print exact fields after we see how EncryptedChat is represented in this codebase.
 } break;
+*/
+
+case mtpc_updateEncryption: {
+	const auto &d = update.c_updateEncryption();
+	const auto &chat = d.vchat();
+
+	switch (chat.type()) {
+	case mtpc_encryptedChatRequested: {
+		const auto &c = chat.c_encryptedChatRequested();
+		LOG(("1337 SecretChat: updateEncryption -> encryptedChatRequested "
+			"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 g_a_size=%6")
+			.arg(c.vid().v)
+			.arg(c.vaccess_hash().v)
+			.arg(c.vadmin_id().v)
+			.arg(c.vparticipant_id().v)
+			.arg(c.vdate().v)
+			.arg(c.vg_a().v.size()));
+	} break;
+
+	case mtpc_encryptedChatDiscarded: {
+		const auto &c = chat.c_encryptedChatDiscarded();
+		LOG(("1337 SecretChat: updateEncryption -> encryptedChatDiscarded "
+			"id=%1")
+			.arg(c.vid().v));
+	} break;
+
+	case mtpc_encryptedChatWaiting: {
+		const auto &c = chat.c_encryptedChatWaiting();
+		LOG(("1337 SecretChat: updateEncryption -> encryptedChatWaiting "
+			"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5")
+			.arg(c.vid().v)
+			.arg(c.vaccess_hash().v)
+			.arg(c.vadmin_id().v)
+			.arg(c.vparticipant_id().v)
+			.arg(c.vdate().v));
+	} break;
+
+	case mtpc_encryptedChat: {
+		const auto &c = chat.c_encryptedChat();
+		LOG(("1337 SecretChat: updateEncryption -> encryptedChat "
+			"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 key_fingerprint=%6 g_a_or_b_size=%7")
+			.arg(c.vid().v)
+			.arg(c.vaccess_hash().v)
+			.arg(c.vadmin_id().v)
+			.arg(c.vparticipant_id().v)
+			.arg(c.vdate().v)
+			.arg(c.vkey_fingerprint().v)
+			.arg(c.vg_a_or_b().v.size()));
+	} break;
+
+	case mtpc_encryptedChatEmpty: {
+		const auto &c = chat.c_encryptedChatEmpty();
+		LOG(("1337 SecretChat: updateEncryption -> encryptedChatEmpty "
+			"id=%1")
+			.arg(c.vid().v));
+	} break;
+
+	default:
+		LOG(("1337 SecretChat: updateEncryption -> unknown chat.type=%1")
+			.arg(int(chat.type())));
+	break;
+	}
+} break;
+
+
 
 	case mtpc_updateEncryptedMessagesRead: {
     LOG(("1338 SecretChat: updateEncryption received."));
