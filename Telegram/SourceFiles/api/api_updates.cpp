@@ -22,6 +22,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/mtproto_config.h"
 #include "mtproto/mtproto_dc_options.h"
 #include "mtproto/mtproto_dh_utils.h"
+#include "mtproto/mtproto_auth_key.h"
 #include "chat_helpers/stickers_dice_pack.h"
 #include "data/business/data_shortcut_messages.h"
 #include "data/components/credits.h"
@@ -75,6 +76,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <cstring>
+
+// Openssl for sha1
+#include "base/openssl_help.h"
+
 namespace Api {
 namespace {
 
@@ -2037,6 +2043,9 @@ case mtpc_updateEncryption: {
 	switch (chat.type()) {
 	case mtpc_encryptedChatRequested: {
 		const auto &c = chat.c_encryptedChatRequested();
+		const auto requestedChatId = c.vid().v;
+		const auto requestedAccessHash = c.vaccess_hash().v;
+		const auto requestedGA = c.vg_a().v;
 		LOG(("1337 SecretChat: updateEncryption -> encryptedChatRequested "
 			"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 g_a_size=%6")
 			.arg(c.vid().v)
@@ -2077,6 +2086,47 @@ case mtpc_updateEncryption: {
 					.arg(data.vp().v.size())
 					.arg(data.vversion().v)
 					.arg(data.vrandom().v.size()));
+
+				auto primeBytes = bytes::make_vector(data.vp().v);
+				if (!MTP::IsPrimeAndGood(primeBytes, data.vg().v)) {
+					LOG(("1337 SecretChat: bad p/g in dhConfig"));
+					return;
+				}
+
+				const auto modexp = MTP::CreateModExp(
+					data.vg().v,
+					primeBytes,
+					bytes::make_span(data.vrandom().v));
+
+				if (modexp.modexp.empty()) {
+					LOG(("1337 SecretChat: CreateModExp failed"));
+					return;
+				}
+
+				const auto computedAuthKey = MTP::CreateAuthKey(
+					bytes::make_span(requestedGA),
+					modexp.randomPower,
+					primeBytes);
+
+				if (computedAuthKey.empty()) {
+					LOG(("1337 SecretChat: CreateAuthKey failed"));
+					return;
+				}
+
+				MTP::AuthKey::Data paddedAuthKey;
+				MTP::AuthKey::FillData(paddedAuthKey, computedAuthKey);
+
+				const auto authKeySha1 = openssl::Sha1(bytes::make_span(paddedAuthKey));
+
+				uint64 keyFingerprint = 0;
+				std::memcpy(&keyFingerprint, authKeySha1.data() + 12, 8);
+
+				LOG(("1337 SecretChat: computed incoming accept values "
+					"g_b_size=%1 shared_key_size=%2 padded_key_size=%3 key_fingerprint=%4")
+					.arg(modexp.modexp.size())
+					.arg(computedAuthKey.size())
+					.arg(int(MTP::AuthKey::kSize))
+					.arg(QString::number(static_cast<qulonglong>(keyFingerprint))));
 			}, [&](const MTPDmessages_dhConfigNotModified &data) {
 				LOG(("1337 SecretChat: getDhConfig -> dhConfigNotModified "
 					"random_size=%1")
