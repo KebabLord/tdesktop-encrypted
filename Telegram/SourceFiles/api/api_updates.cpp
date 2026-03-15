@@ -70,6 +70,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "apiwrap.h"
 #include "ui/text/format_values.h" // Ui::FormatPhone
 
+// To save objects temporarily.
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 namespace Api {
 namespace {
 
@@ -2009,19 +2013,19 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 	} break;
 
 	case mtpc_updateNewEncryptedMessage: {
-        LOG(("1335 SecretChat: updateEncryption received."));
+		LOG(("1335 SecretChat: updateEncryption received."));
 	} break;
 
 	case mtpc_updateEncryptedChatTyping: {
-        LOG(("1336 SecretChat: updateEncryption received."));
+		LOG(("1336 SecretChat: updateEncryption received."));
 	} break;
 
 /* OLD UPDATE ENCRYPTION CODE THAT EXECUTED WHEN WE RECEIVE A SECRET CHAT REQUEST
 case mtpc_updateEncryption: {
-    //const auto &d = update.c_updateEncryption();
-    // d.vchat() is EncryptedChat
-    LOG(("1337 SecretChat: updateEncryption received."));
-    // We'll print exact fields after we see how EncryptedChat is represented in this codebase.
+	//const auto &d = update.c_updateEncryption();
+	// d.vchat() is EncryptedChat
+	LOG(("1337 SecretChat: updateEncryption received."));
+	// We'll print exact fields after we see how EncryptedChat is represented in this codebase.
 } break;
 */
 
@@ -2040,6 +2044,25 @@ case mtpc_updateEncryption: {
 			.arg(c.vparticipant_id().v)
 			.arg(c.vdate().v)
 			.arg(c.vg_a().v.size()));
+		
+		const auto object = QJsonObject{
+			{ "id", QString::number(c.vid().v) },
+			{ "access_hash", QString::number(c.vaccess_hash().v) },
+			{ "admin_id", QString::number(c.vadmin_id().v) },
+			{ "participant_id", QString::number(c.vparticipant_id().v) },
+			{ "date", c.vdate().v },
+			{ "g_a_size", int(c.vg_a().v.size()) },
+			{ "update_date", d.vdate().v },
+		};
+	
+		auto file = QFile("/tmp/secretchat_debug.json");
+		if (file.open(QIODevice::WriteOnly)) {
+			file.write(QJsonDocument(object).toJson(QJsonDocument::Indented));
+			file.close();
+			LOG(("1337 SecretChat: wrote /tmp/secretchat_debug.json"));
+		} else {
+			LOG(("1337 SecretChat: failed to write /tmp/secretchat_debug.json"));
+		}
 	} break;
 
 	case mtpc_encryptedChatDiscarded: {
@@ -2090,7 +2113,7 @@ case mtpc_updateEncryption: {
 
 
 	case mtpc_updateEncryptedMessagesRead: {
-    LOG(("1338 SecretChat: updateEncryption received."));
+	LOG(("1338 SecretChat: updateEncryption received."));
 
 	} break;
 
