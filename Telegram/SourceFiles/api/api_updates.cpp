@@ -21,6 +21,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/mtp_instance.h"
 #include "mtproto/mtproto_config.h"
 #include "mtproto/mtproto_dc_options.h"
+#include "mtproto/mtproto_dh_utils.h"
 #include "chat_helpers/stickers_dice_pack.h"
 #include "data/business/data_shortcut_messages.h"
 #include "data/components/credits.h"
@@ -2063,6 +2064,28 @@ case mtpc_updateEncryption: {
 		} else {
 			LOG(("1337 SecretChat: failed to write /tmp/secretchat_debug.json"));
 		}
+
+		// Get dhConfig for the secret chat.
+		session().api().request(MTPmessages_GetDhConfig(
+			MTP_int(0),
+			MTP_int(MTP::ModExpFirst::kRandomPowerSize)
+		)).done([=](const MTPmessages_DhConfig &result) {
+			result.match([&](const MTPDmessages_dhConfig &data) {
+				LOG(("1337 SecretChat: getDhConfig -> dhConfig "
+					"g=%1 p_size=%2 version=%3 random_size=%4")
+					.arg(data.vg().v)
+					.arg(data.vp().v.size())
+					.arg(data.vversion().v)
+					.arg(data.vrandom().v.size()));
+			}, [&](const MTPDmessages_dhConfigNotModified &data) {
+				LOG(("1337 SecretChat: getDhConfig -> dhConfigNotModified "
+					"random_size=%1")
+					.arg(data.vrandom().v.size()));
+			});
+		}).fail([=] {
+			LOG(("1337 SecretChat: getDhConfig failed"));
+		}).send();
+
 	} break;
 
 	case mtpc_encryptedChatDiscarded: {
