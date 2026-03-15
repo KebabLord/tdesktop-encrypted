@@ -2127,6 +2127,50 @@ case mtpc_updateEncryption: {
 					.arg(computedAuthKey.size())
 					.arg(int(MTP::AuthKey::kSize))
 					.arg(QString::number(static_cast<qulonglong>(keyFingerprint))));
+
+				// Accept secret chat request
+				session().api().request(MTPmessages_AcceptEncryption(
+					MTP_inputEncryptedChat(
+						MTP_int(requestedChatId),
+						MTP_long(requestedAccessHash)
+					),
+					MTP_bytes(modexp.modexp),
+					MTP_long(static_cast<uint64>(keyFingerprint))
+				)).done([=](const MTPEncryptedChat &result) {
+					switch (result.type()) {
+					case mtpc_encryptedChat: {
+						const auto &accepted = result.c_encryptedChat();
+						LOG(("1337 SecretChat: acceptEncryption done -> encryptedChat "
+							"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 key_fingerprint=%6 g_a_or_b_size=%7")
+							.arg(accepted.vid().v)
+							.arg(accepted.vaccess_hash().v)
+							.arg(accepted.vadmin_id().v)
+							.arg(accepted.vparticipant_id().v)
+							.arg(accepted.vdate().v)
+							.arg(accepted.vkey_fingerprint().v)
+							.arg(accepted.vg_a_or_b().v.size()));
+					} break;
+
+					case mtpc_encryptedChatDiscarded: {
+						const auto &discarded = result.c_encryptedChatDiscarded();
+						LOG(("1337 SecretChat: acceptEncryption done -> encryptedChatDiscarded id=%1")
+							.arg(discarded.vid().v));
+					} break;
+
+					case mtpc_encryptedChatWaiting: {
+						const auto &waiting = result.c_encryptedChatWaiting();
+						LOG(("1337 SecretChat: acceptEncryption done -> encryptedChatWaiting id=%1")
+							.arg(waiting.vid().v));
+					} break;
+
+					default:
+						LOG(("1337 SecretChat: acceptEncryption done -> unexpected result.type=%1")
+							.arg(int(result.type())));
+					break;
+					}
+				}).fail([=] {
+					LOG(("1337 SecretChat: acceptEncryption failed"));
+				}).send();
 			}, [&](const MTPDmessages_dhConfigNotModified &data) {
 				LOG(("1337 SecretChat: getDhConfig -> dhConfigNotModified "
 					"random_size=%1")
