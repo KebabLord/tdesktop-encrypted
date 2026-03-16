@@ -73,13 +73,71 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/text/format_values.h" // Ui::FormatPhone
 
 // To save objects temporarily.
-#include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSaveFile>
 #include <cstring>
 
 // Openssl for sha1
 #include "base/openssl_help.h"
+
+// Temporary global store for the secret chat access
+#include <map>
+struct SecretChatState {
+	int64 chat_id = 0;
+	uint64 access_hash = 0;
+
+	uint64 admin_id = 0;
+	uint64 participant_id = 0;
+
+	uint64 key_fingerprint = 0;
+
+	MTP::AuthKey::Data auth_key;
+};
+static std::map<uint64, SecretChatState> g_secretChats;
+
+// Secret chat management helpers
+namespace {
+
+constexpr auto kSecretChatStatePath = "/home/owo/Github/tdesktop/tmp/secretchat_debug.json";
+
+[[nodiscard]] QString AuthKeyToHex(const MTP::AuthKey::Data &authKey) {
+	const auto raw = QByteArray(
+		reinterpret_cast<const char*>(authKey.data()),
+		authKey.size());
+	return QString::fromLatin1(raw.toHex());
+}
+
+[[nodiscard]] bool SaveSecretChatState(const SecretChatState &state) {
+	const auto object = QJsonObject{
+		{ "chat_id", QString::number(state.chat_id) },
+		{ "access_hash", QString::number(static_cast<qulonglong>(state.access_hash)) },
+		{ "admin_id", QString::number(static_cast<qulonglong>(state.admin_id)) },
+		{ "participant_id", QString::number(static_cast<qulonglong>(state.participant_id)) },
+		{ "key_fingerprint", QString::number(static_cast<qulonglong>(state.key_fingerprint)) },
+		{ "auth_key_hex", AuthKeyToHex(state.auth_key) },
+	};
+
+	auto file = QSaveFile(kSecretChatStatePath);
+	if (!file.open(QIODevice::WriteOnly)) {
+		LOG(("1337 SecretChat: failed to open state file %1").arg(kSecretChatStatePath));
+		return false;
+	}
+	if (file.write(QJsonDocument(object).toJson(QJsonDocument::Indented)) < 0) {
+		LOG(("1337 SecretChat: failed to write state file %1").arg(kSecretChatStatePath));
+		return false;
+	}
+	if (!file.commit()) {
+		LOG(("1337 SecretChat: failed to commit state file %1").arg(kSecretChatStatePath));
+		return false;
+	}
+
+	LOG(("1337 SecretChat: saved state to %1").arg(kSecretChatStatePath));
+	return true;
+}
+
+} // namespace
+
 
 namespace Api {
 namespace {
@@ -2020,219 +2078,205 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 	} break;
 
 	case mtpc_updateNewEncryptedMessage: {
-		LOG(("1335 SecretChat: updateEncryption received."));
+		LOG(("1335 SecretChat: updateNewEncryptedMessage received."));
 	} break;
 
 	case mtpc_updateEncryptedChatTyping: {
-		LOG(("1336 SecretChat: updateEncryption received."));
+		LOG(("1336 SecretChat: updateEncryptedChatTyping received."));
 	} break;
 
-/* OLD UPDATE ENCRYPTION CODE THAT EXECUTED WHEN WE RECEIVE A SECRET CHAT REQUEST
-case mtpc_updateEncryption: {
-	//const auto &d = update.c_updateEncryption();
-	// d.vchat() is EncryptedChat
-	LOG(("1337 SecretChat: updateEncryption received."));
-	// We'll print exact fields after we see how EncryptedChat is represented in this codebase.
-} break;
-*/
+	case mtpc_updateEncryption: {
+		const auto &d = update.c_updateEncryption();
+		const auto &chat = d.vchat();
 
-case mtpc_updateEncryption: {
-	const auto &d = update.c_updateEncryption();
-	const auto &chat = d.vchat();
+		switch (chat.type()) {
+		case mtpc_encryptedChatRequested: {
+			const auto &c = chat.c_encryptedChatRequested();
 
-	switch (chat.type()) {
-	case mtpc_encryptedChatRequested: {
-		const auto &c = chat.c_encryptedChatRequested();
-		const auto requestedChatId = c.vid().v;
-		const auto requestedAccessHash = c.vaccess_hash().v;
-		const auto requestedGA = c.vg_a().v;
-		LOG(("1337 SecretChat: updateEncryption -> encryptedChatRequested "
-			"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 g_a_size=%6")
-			.arg(c.vid().v)
-			.arg(c.vaccess_hash().v)
-			.arg(c.vadmin_id().v)
-			.arg(c.vparticipant_id().v)
-			.arg(c.vdate().v)
-			.arg(c.vg_a().v.size()));
-		
-		const auto object = QJsonObject{
-			{ "id", QString::number(c.vid().v) },
-			{ "access_hash", QString::number(c.vaccess_hash().v) },
-			{ "admin_id", QString::number(c.vadmin_id().v) },
-			{ "participant_id", QString::number(c.vparticipant_id().v) },
-			{ "date", c.vdate().v },
-			{ "g_a_size", int(c.vg_a().v.size()) },
-			{ "update_date", d.vdate().v },
-		};
-	
-		auto file = QFile("/tmp/secretchat_debug.json");
-		if (file.open(QIODevice::WriteOnly)) {
-			file.write(QJsonDocument(object).toJson(QJsonDocument::Indented));
-			file.close();
-			LOG(("1337 SecretChat: wrote /tmp/secretchat_debug.json"));
-		} else {
-			LOG(("1337 SecretChat: failed to write /tmp/secretchat_debug.json"));
-		}
+			// Copy request fields before async work.
+			const auto requestedChatId = c.vid().v;
+			const auto requestedAccessHash = c.vaccess_hash().v;
+			const auto requestedAdminId = c.vadmin_id().v;
+			const auto requestedParticipantId = c.vparticipant_id().v;
+			const auto requestedGA = c.vg_a().v;
 
-		// Get dhConfig for the secret chat.
-		session().api().request(MTPmessages_GetDhConfig(
-			MTP_int(0),
-			MTP_int(MTP::ModExpFirst::kRandomPowerSize)
-		)).done([=](const MTPmessages_DhConfig &result) {
-			result.match([&](const MTPDmessages_dhConfig &data) {
-				LOG(("1337 SecretChat: getDhConfig -> dhConfig "
-					"g=%1 p_size=%2 version=%3 random_size=%4")
-					.arg(data.vg().v)
-					.arg(data.vp().v.size())
-					.arg(data.vversion().v)
-					.arg(data.vrandom().v.size()));
+			LOG(("1337 SecretChat: updateEncryption -> encryptedChatRequested "
+				"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 g_a_size=%6")
+				.arg(requestedChatId)
+				.arg(requestedAccessHash)
+				.arg(requestedAdminId)
+				.arg(requestedParticipantId)
+				.arg(c.vdate().v)
+				.arg(requestedGA.size()));
 
-				auto primeBytes = bytes::make_vector(data.vp().v);
-				if (!MTP::IsPrimeAndGood(primeBytes, data.vg().v)) {
-					LOG(("1337 SecretChat: bad p/g in dhConfig"));
-					return;
-				}
+			// Fetch DH config, generate g_b, compute shared auth_key, then accept.
+			session().api().request(MTPmessages_GetDhConfig(
+				MTP_int(0),
+				MTP_int(MTP::ModExpFirst::kRandomPowerSize)
+			)).done([=](const MTPmessages_DhConfig &result) {
+				result.match([&](const MTPDmessages_dhConfig &data) {
+					LOG(("1337 SecretChat: getDhConfig -> dhConfig "
+						"g=%1 p_size=%2 version=%3 random_size=%4")
+						.arg(data.vg().v)
+						.arg(data.vp().v.size())
+						.arg(data.vversion().v)
+						.arg(data.vrandom().v.size()));
 
-				const auto modexp = MTP::CreateModExp(
-					data.vg().v,
-					primeBytes,
-					bytes::make_span(data.vrandom().v));
-
-				if (modexp.modexp.empty()) {
-					LOG(("1337 SecretChat: CreateModExp failed"));
-					return;
-				}
-
-				const auto computedAuthKey = MTP::CreateAuthKey(
-					bytes::make_span(requestedGA),
-					modexp.randomPower,
-					primeBytes);
-
-				if (computedAuthKey.empty()) {
-					LOG(("1337 SecretChat: CreateAuthKey failed"));
-					return;
-				}
-
-				MTP::AuthKey::Data paddedAuthKey;
-				MTP::AuthKey::FillData(paddedAuthKey, computedAuthKey);
-
-				const auto authKeySha1 = openssl::Sha1(bytes::make_span(paddedAuthKey));
-
-				uint64 keyFingerprint = 0;
-				std::memcpy(&keyFingerprint, authKeySha1.data() + 12, 8);
-
-				LOG(("1337 SecretChat: computed incoming accept values "
-					"g_b_size=%1 shared_key_size=%2 padded_key_size=%3 key_fingerprint=%4")
-					.arg(modexp.modexp.size())
-					.arg(computedAuthKey.size())
-					.arg(int(MTP::AuthKey::kSize))
-					.arg(QString::number(static_cast<qulonglong>(keyFingerprint))));
-
-				// Accept secret chat request
-				session().api().request(MTPmessages_AcceptEncryption(
-					MTP_inputEncryptedChat(
-						MTP_int(requestedChatId),
-						MTP_long(requestedAccessHash)
-					),
-					MTP_bytes(modexp.modexp),
-					MTP_long(static_cast<uint64>(keyFingerprint))
-				)).done([=](const MTPEncryptedChat &result) {
-					switch (result.type()) {
-					case mtpc_encryptedChat: {
-						const auto &accepted = result.c_encryptedChat();
-						LOG(("1337 SecretChat: acceptEncryption done -> encryptedChat "
-							"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 key_fingerprint=%6 g_a_or_b_size=%7")
-							.arg(accepted.vid().v)
-							.arg(accepted.vaccess_hash().v)
-							.arg(accepted.vadmin_id().v)
-							.arg(accepted.vparticipant_id().v)
-							.arg(accepted.vdate().v)
-							.arg(accepted.vkey_fingerprint().v)
-							.arg(accepted.vg_a_or_b().v.size()));
-					} break;
-
-					case mtpc_encryptedChatDiscarded: {
-						const auto &discarded = result.c_encryptedChatDiscarded();
-						LOG(("1337 SecretChat: acceptEncryption done -> encryptedChatDiscarded id=%1")
-							.arg(discarded.vid().v));
-					} break;
-
-					case mtpc_encryptedChatWaiting: {
-						const auto &waiting = result.c_encryptedChatWaiting();
-						LOG(("1337 SecretChat: acceptEncryption done -> encryptedChatWaiting id=%1")
-							.arg(waiting.vid().v));
-					} break;
-
-					default:
-						LOG(("1337 SecretChat: acceptEncryption done -> unexpected result.type=%1")
-							.arg(int(result.type())));
-					break;
+					auto primeBytes = bytes::make_vector(data.vp().v);
+					if (!MTP::IsPrimeAndGood(primeBytes, data.vg().v)) {
+						LOG(("1337 SecretChat: bad p/g in dhConfig"));
+						return;
 					}
-				}).fail([=] {
-					LOG(("1337 SecretChat: acceptEncryption failed"));
-				}).send();
-			}, [&](const MTPDmessages_dhConfigNotModified &data) {
-				LOG(("1337 SecretChat: getDhConfig -> dhConfigNotModified "
-					"random_size=%1")
-					.arg(data.vrandom().v.size()));
-			});
-		}).fail([=] {
-			LOG(("1337 SecretChat: getDhConfig failed"));
-		}).send();
 
+					const auto modexp = MTP::CreateModExp(
+						data.vg().v,
+						primeBytes,
+						bytes::make_span(data.vrandom().v));
+
+					if (modexp.modexp.empty()) {
+						LOG(("1337 SecretChat: CreateModExp failed"));
+						return;
+					}
+
+					const auto computedAuthKey = MTP::CreateAuthKey(
+						bytes::make_span(requestedGA),
+						modexp.randomPower,
+						primeBytes);
+
+					if (computedAuthKey.empty()) {
+						LOG(("1337 SecretChat: CreateAuthKey failed"));
+						return;
+					}
+
+					MTP::AuthKey::Data paddedAuthKey = {};
+					MTP::AuthKey::FillData(paddedAuthKey, computedAuthKey);
+
+					const auto authKeySha1 = openssl::Sha1(bytes::make_span(paddedAuthKey));
+
+					uint64 keyFingerprint = 0;
+					std::memcpy(&keyFingerprint, authKeySha1.data() + 12, 8);
+
+					LOG(("1337 SecretChat: computed incoming accept values "
+						"g_b_size=%1 shared_key_size=%2 padded_key_size=%3 key_fingerprint=%4")
+						.arg(modexp.modexp.size())
+						.arg(computedAuthKey.size())
+						.arg(int(MTP::AuthKey::kSize))
+						.arg(QString::number(static_cast<qulonglong>(keyFingerprint))));
+
+					session().api().request(MTPmessages_AcceptEncryption(
+						MTP_inputEncryptedChat(
+							MTP_int(requestedChatId),
+							MTP_long(requestedAccessHash)
+						),
+						MTP_bytes(modexp.modexp),
+						MTP_long(static_cast<uint64>(keyFingerprint))
+					)).done([=](const MTPEncryptedChat &result) {
+						switch (result.type()) {
+						case mtpc_encryptedChat: {
+							const auto &accepted = result.c_encryptedChat();
+
+							LOG(("1337 SecretChat: acceptEncryption done -> encryptedChat "
+								"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 key_fingerprint=%6 g_a_or_b_size=%7")
+								.arg(accepted.vid().v)
+								.arg(accepted.vaccess_hash().v)
+								.arg(accepted.vadmin_id().v)
+								.arg(accepted.vparticipant_id().v)
+								.arg(accepted.vdate().v)
+								.arg(accepted.vkey_fingerprint().v)
+								.arg(accepted.vg_a_or_b().v.size()));
+
+							SecretChatState state;
+							state.chat_id = accepted.vid().v;
+							state.access_hash = static_cast<uint64>(accepted.vaccess_hash().v);
+							state.admin_id = static_cast<uint64>(accepted.vadmin_id().v);
+							state.participant_id = static_cast<uint64>(accepted.vparticipant_id().v);
+							state.key_fingerprint = keyFingerprint;
+							state.auth_key = paddedAuthKey;
+
+							if (!SaveSecretChatState(state)) {
+								LOG(("1337 SecretChat: state save failed after acceptEncryption"));
+							}
+						} break;
+
+						case mtpc_encryptedChatDiscarded: {
+							const auto &discarded = result.c_encryptedChatDiscarded();
+							LOG(("1337 SecretChat: acceptEncryption done -> encryptedChatDiscarded id=%1")
+								.arg(discarded.vid().v));
+						} break;
+
+						case mtpc_encryptedChatWaiting: {
+							const auto &waiting = result.c_encryptedChatWaiting();
+							LOG(("1337 SecretChat: acceptEncryption done -> encryptedChatWaiting id=%1")
+								.arg(waiting.vid().v));
+						} break;
+
+						default:
+							LOG(("1337 SecretChat: acceptEncryption done -> unexpected result.type=%1")
+								.arg(int(result.type())));
+						break;
+						}
+					}).fail([=] {
+						LOG(("1337 SecretChat: acceptEncryption failed"));
+					}).send();
+
+				}, [&](const MTPDmessages_dhConfigNotModified &data) {
+					LOG(("1337 SecretChat: getDhConfig -> dhConfigNotModified "
+						"random_size=%1")
+						.arg(data.vrandom().v.size()));
+				});
+			}).fail([=] {
+				LOG(("1337 SecretChat: getDhConfig failed"));
+			}).send();
+
+		} break;
+
+		case mtpc_encryptedChatDiscarded: {
+			const auto &c = chat.c_encryptedChatDiscarded();
+			LOG(("1337 SecretChat: updateEncryption -> encryptedChatDiscarded id=%1")
+				.arg(c.vid().v));
+		} break;
+
+		case mtpc_encryptedChatWaiting: {
+			const auto &c = chat.c_encryptedChatWaiting();
+			LOG(("1337 SecretChat: updateEncryption -> encryptedChatWaiting "
+				"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5")
+				.arg(c.vid().v)
+				.arg(c.vaccess_hash().v)
+				.arg(c.vadmin_id().v)
+				.arg(c.vparticipant_id().v)
+				.arg(c.vdate().v));
+		} break;
+
+		case mtpc_encryptedChat: {
+			const auto &c = chat.c_encryptedChat();
+			LOG(("1337 SecretChat: updateEncryption -> encryptedChat "
+				"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 key_fingerprint=%6 g_a_or_b_size=%7")
+				.arg(c.vid().v)
+				.arg(c.vaccess_hash().v)
+				.arg(c.vadmin_id().v)
+				.arg(c.vparticipant_id().v)
+				.arg(c.vdate().v)
+				.arg(c.vkey_fingerprint().v)
+				.arg(c.vg_a_or_b().v.size()));
+		} break;
+
+		case mtpc_encryptedChatEmpty: {
+			const auto &c = chat.c_encryptedChatEmpty();
+			LOG(("1337 SecretChat: updateEncryption -> encryptedChatEmpty id=%1")
+				.arg(c.vid().v));
+		} break;
+
+		default:
+			LOG(("1337 SecretChat: updateEncryption -> unknown chat.type=%1")
+				.arg(int(chat.type())));
+		break;
+		}
 	} break;
-
-	case mtpc_encryptedChatDiscarded: {
-		const auto &c = chat.c_encryptedChatDiscarded();
-		LOG(("1337 SecretChat: updateEncryption -> encryptedChatDiscarded "
-			"id=%1")
-			.arg(c.vid().v));
-	} break;
-
-	case mtpc_encryptedChatWaiting: {
-		const auto &c = chat.c_encryptedChatWaiting();
-		LOG(("1337 SecretChat: updateEncryption -> encryptedChatWaiting "
-			"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5")
-			.arg(c.vid().v)
-			.arg(c.vaccess_hash().v)
-			.arg(c.vadmin_id().v)
-			.arg(c.vparticipant_id().v)
-			.arg(c.vdate().v));
-	} break;
-
-	case mtpc_encryptedChat: {
-		const auto &c = chat.c_encryptedChat();
-		LOG(("1337 SecretChat: updateEncryption -> encryptedChat "
-			"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 key_fingerprint=%6 g_a_or_b_size=%7")
-			.arg(c.vid().v)
-			.arg(c.vaccess_hash().v)
-			.arg(c.vadmin_id().v)
-			.arg(c.vparticipant_id().v)
-			.arg(c.vdate().v)
-			.arg(c.vkey_fingerprint().v)
-			.arg(c.vg_a_or_b().v.size()));
-	} break;
-
-	case mtpc_encryptedChatEmpty: {
-		const auto &c = chat.c_encryptedChatEmpty();
-		LOG(("1337 SecretChat: updateEncryption -> encryptedChatEmpty "
-			"id=%1")
-			.arg(c.vid().v));
-	} break;
-
-	default:
-		LOG(("1337 SecretChat: updateEncryption -> unknown chat.type=%1")
-			.arg(int(chat.type())));
-	break;
-	}
-} break;
-
-
 
 	case mtpc_updateEncryptedMessagesRead: {
-	LOG(("1338 SecretChat: updateEncryption received."));
-
+		LOG(("1338 SecretChat: updateEncryptedMessagesRead received."));
 	} break;
+
 
 	case mtpc_updatePhoneCall:
 	case mtpc_updatePhoneCallSignalingData:
