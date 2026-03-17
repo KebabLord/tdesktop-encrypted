@@ -257,8 +257,8 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 
 [[nodiscard]] std::optional<QByteArray> DecryptSecretChatPayloadMtproto2(
 		const SecretChatState &state,
-		const QByteArray &payload) {
-	// Envelope: 8 bytes fingerprint + 16 bytes msg_key + encrypted bytes.
+		const QByteArray &payload,
+		int x) {
 	if (payload.size() < 24) {
 		LOG(("1335 SecretChat: payload too short for decryption size=%1")
 			.arg(payload.size()));
@@ -272,33 +272,71 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 		return std::nullopt;
 	}
 
-	const auto authKey = MakeSecretChatAuthKey(state);
-
 	MTPint128 msgKey;
 	std::memcpy(&msgKey, payload.constData() + 8, sizeof(msgKey));
 
+	MTPint256 aesKey, aesIV;
+
+	// Secret chats MTProto 2.0 use x based on sender role, not send/receive direction.
+	{
+		bytes::array<32> sha256_a, sha256_b;
+		bytes::array<16 + 36> data_a;
+		std::memcpy(data_a.data(), &msgKey, 16);
+		std::memcpy(
+			data_a.data() + 16,
+			reinterpret_cast<const uchar*>(state.auth_key.data()) + x,
+			36);
+		openssl::Sha256To(sha256_a, data_a);
+
+		bytes::array<36 + 16> data_b;
+		std::memcpy(
+			data_b.data(),
+			reinterpret_cast<const uchar*>(state.auth_key.data()) + 40 + x,
+			36);
+		std::memcpy(data_b.data() + 36, &msgKey, 16);
+		openssl::Sha256To(sha256_b, data_b);
+
+		auto key = reinterpret_cast<uchar*>(&aesKey);
+		auto iv = reinterpret_cast<uchar*>(&aesIV);
+		std::memcpy(key, sha256_a.data(), 8);
+		std::memcpy(key + 8, sha256_b.data() + 8, 16);
+		std::memcpy(key + 24, sha256_a.data() + 24, 8);
+		std::memcpy(iv, sha256_b.data(), 8);
+		std::memcpy(iv + 8, sha256_a.data() + 8, 16);
+		std::memcpy(iv + 24, sha256_b.data() + 24, 8);
+	}
+
 	auto decrypted = QByteArray(encryptedSize, Qt::Uninitialized);
-	aesIgeDecrypt(
+	MTP::aesIgeDecryptRaw(
 		payload.constData() + 24,
 		decrypted.data(),
 		encryptedSize,
-		authKey,
-		msgKey);
+		&aesKey,
+		&aesIV);
 
-	// Verify msg_key exactly like MTProto 2.0 transport code.
+	// Verify msg_key using the same x.
 	std::array<uchar, 32> sha256Buffer = { { 0 } };
 	SHA256_CTX msgKeyLargeContext;
 	SHA256_Init(&msgKeyLargeContext);
-	SHA256_Update(&msgKeyLargeContext, authKey->partForMsgKey(false), 32);
-	SHA256_Update(&msgKeyLargeContext, decrypted.constData(), size_t(encryptedSize));
+	SHA256_Update(
+		&msgKeyLargeContext,
+		reinterpret_cast<const uchar*>(state.auth_key.data()) + 88 + x,
+		32);
+	SHA256_Update(
+		&msgKeyLargeContext,
+		decrypted.constData(),
+		size_t(encryptedSize));
 	SHA256_Final(sha256Buffer.data(), &msgKeyLargeContext);
 
 	constexpr auto kMsgKeyShift = 8U;
 	if (std::memcmp(&msgKey, sha256Buffer.data() + kMsgKeyShift, sizeof(msgKey)) != 0) {
-		LOG(("1335 SecretChat: MTProto2 msg_key verification failed"));
+		LOG(("1335 SecretChat: MTProto2 msg_key verification failed x=%1")
+			.arg(x));
 		return std::nullopt;
 	}
 
+	LOG(("1335 SecretChat: MTProto2 msg_key verification passed x=%1")
+		.arg(x));
 	return decrypted;
 }
 
@@ -2331,7 +2369,7 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				break;
 			}
 
-			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload);
+			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload, 0);
 			if (!decrypted.has_value()) {
 				LOG(("1335 SecretChat: failed to decrypt encryptedMessageService chat_id=%1")
 					.arg(chatId));
@@ -2389,7 +2427,7 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				break;
 			}
 
-			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload);
+			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload, 0);
 			if (!decrypted.has_value()) {
 				LOG(("1335 SecretChat: failed to decrypt encryptedMessage chat_id=%1")
 					.arg(chatId));
