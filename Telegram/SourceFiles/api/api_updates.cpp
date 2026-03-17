@@ -101,7 +101,7 @@ struct SecretChatState {
 };
 static std::map<uint64, SecretChatState> g_secretChats;
 
-// Secret chat management helpers
+// Secret chat storage / state management helpers
 namespace {
 
 constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
@@ -237,6 +237,105 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 		.arg(state.chat_id)
 		.arg(QString::number(static_cast<qulonglong>(state.key_fingerprint))));
 	return state;
+}
+
+// Decryption Helpers
+[[nodiscard]] MTP::AuthKeyPtr MakeSecretChatAuthKey(
+		const SecretChatState &state) {
+	return std::make_shared<MTP::AuthKey>(state.auth_key);
+}
+
+[[nodiscard]] QString HexPrefix(const QByteArray &data, int maxBytes = 64) {
+	return QString::fromLatin1(data.left(maxBytes).toHex());
+}
+
+[[nodiscard]] uint32 ReadLE32(const char *data) {
+	uint32 value = 0;
+	std::memcpy(&value, data, sizeof(value));
+	return value;
+}
+
+[[nodiscard]] std::optional<QByteArray> DecryptSecretChatPayloadMtproto2(
+		const SecretChatState &state,
+		const QByteArray &payload) {
+	// Envelope: 8 bytes fingerprint + 16 bytes msg_key + encrypted bytes.
+	if (payload.size() < 24) {
+		LOG(("1335 SecretChat: payload too short for decryption size=%1")
+			.arg(payload.size()));
+		return std::nullopt;
+	}
+
+	const auto encryptedSize = payload.size() - 24;
+	if ((encryptedSize <= 0) || (encryptedSize % 16 != 0)) {
+		LOG(("1335 SecretChat: encrypted payload size is invalid size=%1")
+			.arg(encryptedSize));
+		return std::nullopt;
+	}
+
+	const auto authKey = MakeSecretChatAuthKey(state);
+
+	MTPint128 msgKey;
+	std::memcpy(&msgKey, payload.constData() + 8, sizeof(msgKey));
+
+	auto decrypted = QByteArray(encryptedSize, Qt::Uninitialized);
+	aesIgeDecrypt(
+		payload.constData() + 24,
+		decrypted.data(),
+		encryptedSize,
+		authKey,
+		msgKey);
+
+	// Verify msg_key exactly like MTProto 2.0 transport code.
+	std::array<uchar, 32> sha256Buffer = { { 0 } };
+	SHA256_CTX msgKeyLargeContext;
+	SHA256_Init(&msgKeyLargeContext);
+	SHA256_Update(&msgKeyLargeContext, authKey->partForMsgKey(false), 32);
+	SHA256_Update(&msgKeyLargeContext, decrypted.constData(), size_t(encryptedSize));
+	SHA256_Final(sha256Buffer.data(), &msgKeyLargeContext);
+
+	constexpr auto kMsgKeyShift = 8U;
+	if (std::memcmp(&msgKey, sha256Buffer.data() + kMsgKeyShift, sizeof(msgKey)) != 0) {
+		LOG(("1335 SecretChat: MTProto2 msg_key verification failed"));
+		return std::nullopt;
+	}
+
+	return decrypted;
+}
+
+void LogDecryptedSecretChatPayload(
+		int64 chatId,
+		const QByteArray &decrypted,
+		const char *label) {
+	if (decrypted.size() < 28) {
+		LOG(("1335 SecretChat: %1 decrypted payload too short chat_id=%2 size=%3 hex=%4")
+			.arg(label)
+			.arg(chatId)
+			.arg(decrypted.size())
+			.arg(HexPrefix(decrypted)));
+		return;
+	}
+
+	const auto *raw = decrypted.constData();
+
+	const auto length = ReadLE32(raw + 0);
+	const auto payloadType = ReadLE32(raw + 4);
+	const auto layer = ReadLE32(raw + 8 + 16);      // after min 16 random bytes
+	const auto inSeqNo = ReadLE32(raw + 8 + 16 + 4);
+	const auto outSeqNo = ReadLE32(raw + 8 + 16 + 8);
+	const auto messageType = ReadLE32(raw + 8 + 16 + 12);
+
+	LOG(("1335 SecretChat: %1 decrypted chat_id=%2 "
+		"decrypted_size=%3 length=%4 payload_type=%5 layer=%6 in_seq_no=%7 out_seq_no=%8 message_type=%9 hex_prefix=%10")
+		.arg(label)
+		.arg(chatId)
+		.arg(decrypted.size())
+		.arg(length)
+		.arg(payloadType)
+		.arg(layer)
+		.arg(inSeqNo)
+		.arg(outSeqNo)
+		.arg(messageType)
+		.arg(HexPrefix(decrypted, 96)));
 }
 
 } // namespace
@@ -2225,6 +2324,21 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				.arg(QString::number(static_cast<qulonglong>(receivedFingerprint)))
 				.arg(QString::fromLatin1(msgKeyHex))
 				.arg(encryptedSize));
+
+			if (receivedFingerprint != state->key_fingerprint) {
+				LOG(("1335 SecretChat: fingerprint mismatch for encryptedMessageService chat_id=%1")
+					.arg(chatId));
+				break;
+			}
+
+			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload);
+			if (!decrypted.has_value()) {
+				LOG(("1335 SecretChat: failed to decrypt encryptedMessageService chat_id=%1")
+					.arg(chatId));
+				break;
+			}
+
+			LogDecryptedSecretChatPayload(chatId, *decrypted, "encryptedMessageService");
 		} break;
 
 		case mtpc_encryptedMessage: {
@@ -2268,6 +2382,21 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				.arg(QString::number(static_cast<qulonglong>(receivedFingerprint)))
 				.arg(QString::fromLatin1(msgKeyHex))
 				.arg(encryptedSize));
+
+			if (receivedFingerprint != state->key_fingerprint) {
+				LOG(("1335 SecretChat: fingerprint mismatch for encryptedMessage chat_id=%1")
+					.arg(chatId));
+				break;
+			}
+
+			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload);
+			if (!decrypted.has_value()) {
+				LOG(("1335 SecretChat: failed to decrypt encryptedMessage chat_id=%1")
+					.arg(chatId));
+				break;
+			}
+
+			LogDecryptedSecretChatPayload(chatId, *decrypted, "encryptedMessage");
 		} break;
 
 		default:
