@@ -73,9 +73,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/text/format_values.h" // Ui::FormatPhone
 
 // To save objects temporarily.
+#include <QByteArray>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <optional>
 #include <cstring>
 
 // Openssl for sha1
@@ -99,16 +104,37 @@ static std::map<uint64, SecretChatState> g_secretChats;
 // Secret chat management helpers
 namespace {
 
-constexpr auto kSecretChatStatePath = "/home/owo/Github/tdesktop/tmp/secretchat_debug.json";
+constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
+
+[[nodiscard]] QString SecretChatStatePath(int64 chatId) {
+	return QString("%1/%2.json").arg(kSecretChatsDir).arg(chatId);
+}
 
 [[nodiscard]] QString AuthKeyToHex(const MTP::AuthKey::Data &authKey) {
 	const auto raw = QByteArray(
 		reinterpret_cast<const char*>(authKey.data()),
-		authKey.size());
+		int(authKey.size()));
 	return QString::fromLatin1(raw.toHex());
 }
 
+[[nodiscard]] bool AuthKeyFromHex(
+		const QString &hex,
+		MTP::AuthKey::Data &out) {
+	const auto raw = QByteArray::fromHex(hex.toLatin1());
+	if (raw.size() != int(MTP::AuthKey::kSize)) {
+		return false;
+	}
+	std::memcpy(out.data(), raw.constData(), size_t(raw.size()));
+	return true;
+}
+
 [[nodiscard]] bool SaveSecretChatState(const SecretChatState &state) {
+	QDir dir;
+	if (!dir.mkpath(kSecretChatsDir)) {
+		LOG(("1337 SecretChat: failed to create state dir %1").arg(kSecretChatsDir));
+		return false;
+	}
+
 	const auto object = QJsonObject{
 		{ "chat_id", QString::number(state.chat_id) },
 		{ "access_hash", QString::number(static_cast<qulonglong>(state.access_hash)) },
@@ -118,22 +144,99 @@ constexpr auto kSecretChatStatePath = "/home/owo/Github/tdesktop/tmp/secretchat_
 		{ "auth_key_hex", AuthKeyToHex(state.auth_key) },
 	};
 
-	auto file = QSaveFile(kSecretChatStatePath);
+	auto file = QSaveFile(SecretChatStatePath(state.chat_id));
 	if (!file.open(QIODevice::WriteOnly)) {
-		LOG(("1337 SecretChat: failed to open state file %1").arg(kSecretChatStatePath));
+		LOG(("1337 SecretChat: failed to open state file %1")
+			.arg(SecretChatStatePath(state.chat_id)));
 		return false;
 	}
 	if (file.write(QJsonDocument(object).toJson(QJsonDocument::Indented)) < 0) {
-		LOG(("1337 SecretChat: failed to write state file %1").arg(kSecretChatStatePath));
+		LOG(("1337 SecretChat: failed to write state file %1")
+			.arg(SecretChatStatePath(state.chat_id)));
 		return false;
 	}
 	if (!file.commit()) {
-		LOG(("1337 SecretChat: failed to commit state file %1").arg(kSecretChatStatePath));
+		LOG(("1337 SecretChat: failed to commit state file %1")
+			.arg(SecretChatStatePath(state.chat_id)));
 		return false;
 	}
 
-	LOG(("1337 SecretChat: saved state to %1").arg(kSecretChatStatePath));
+	LOG(("1337 SecretChat: saved state to %1")
+		.arg(SecretChatStatePath(state.chat_id)));
 	return true;
+}
+
+[[nodiscard]] std::optional<SecretChatState> LoadSecretChatState(int64 chatId) {
+	auto file = QFile(SecretChatStatePath(chatId));
+	if (!file.exists()) {
+		LOG(("1337 SecretChat: state file does not exist for chat_id=%1 path=%2")
+			.arg(chatId)
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+	if (!file.open(QIODevice::ReadOnly)) {
+		LOG(("1337 SecretChat: failed to open state file %1")
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+
+	const auto doc = QJsonDocument::fromJson(file.readAll());
+	if (!doc.isObject()) {
+		LOG(("1337 SecretChat: invalid JSON in state file %1")
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+
+	const auto object = doc.object();
+	SecretChatState state;
+
+	bool ok = false;
+
+	state.chat_id = object.value("chat_id").toString().toLongLong(&ok);
+	if (!ok) {
+		LOG(("1337 SecretChat: invalid chat_id in state file %1")
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+
+	state.access_hash = object.value("access_hash").toString().toULongLong(&ok);
+	if (!ok) {
+		LOG(("1337 SecretChat: invalid access_hash in state file %1")
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+
+	state.admin_id = object.value("admin_id").toString().toULongLong(&ok);
+	if (!ok) {
+		LOG(("1337 SecretChat: invalid admin_id in state file %1")
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+
+	state.participant_id = object.value("participant_id").toString().toULongLong(&ok);
+	if (!ok) {
+		LOG(("1337 SecretChat: invalid participant_id in state file %1")
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+
+	state.key_fingerprint = object.value("key_fingerprint").toString().toULongLong(&ok);
+	if (!ok) {
+		LOG(("1337 SecretChat: invalid key_fingerprint in state file %1")
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+
+	if (!AuthKeyFromHex(object.value("auth_key_hex").toString(), state.auth_key)) {
+		LOG(("1337 SecretChat: invalid auth_key_hex in state file %1")
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+
+	LOG(("1337 SecretChat: loaded state for chat_id=%1 key_fingerprint=%2")
+		.arg(state.chat_id)
+		.arg(QString::number(static_cast<qulonglong>(state.key_fingerprint))));
+	return state;
 }
 
 } // namespace
@@ -2078,7 +2181,100 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 	} break;
 
 	case mtpc_updateNewEncryptedMessage: {
-		LOG(("1335 SecretChat: updateNewEncryptedMessage received."));
+		const auto &d = update.c_updateNewEncryptedMessage();
+		const auto &message = d.vmessage();
+
+		switch (message.type()) {
+		case mtpc_encryptedMessageService: {
+			const auto &m = message.c_encryptedMessageService();
+			const auto chatId = int64(m.vchat_id().v);
+			const auto payload = m.vbytes().v;
+
+			LOG(("1335 SecretChat: updateNewEncryptedMessage -> encryptedMessageService "
+				"chat_id=%1 random_id=%2 date=%3 bytes_size=%4 qts=%5")
+				.arg(chatId)
+				.arg(QString::number(static_cast<qulonglong>(m.vrandom_id().v)))
+				.arg(m.vdate().v)
+				.arg(payload.size())
+				.arg(d.vqts().v));
+
+			const auto state = LoadSecretChatState(chatId);
+			if (!state.has_value()) {
+				LOG(("1335 SecretChat: no state found for encryptedMessageService chat_id=%1")
+					.arg(chatId));
+				break;
+			}
+
+			if (payload.size() < 24) {
+				LOG(("1335 SecretChat: payload too short for encryptedMessageService chat_id=%1 size=%2")
+					.arg(chatId)
+					.arg(payload.size()));
+				break;
+			}
+
+			uint64 receivedFingerprint = 0;
+			std::memcpy(&receivedFingerprint, payload.constData(), 8);
+
+			const auto msgKeyHex = payload.mid(8, 16).toHex();
+			const auto encryptedSize = payload.size() - 24;
+
+			LOG(("1335 SecretChat: encryptedMessageService envelope "
+				"chat_id=%1 stored_fingerprint=%2 received_fingerprint=%3 msg_key=%4 encrypted_size=%5")
+				.arg(chatId)
+				.arg(QString::number(static_cast<qulonglong>(state->key_fingerprint)))
+				.arg(QString::number(static_cast<qulonglong>(receivedFingerprint)))
+				.arg(QString::fromLatin1(msgKeyHex))
+				.arg(encryptedSize));
+		} break;
+
+		case mtpc_encryptedMessage: {
+			const auto &m = message.c_encryptedMessage();
+			const auto chatId = int64(m.vchat_id().v);
+			const auto payload = m.vbytes().v;
+
+			LOG(("1335 SecretChat: updateNewEncryptedMessage -> encryptedMessage "
+				"chat_id=%1 random_id=%2 date=%3 bytes_size=%4 qts=%5 has_file=%6")
+				.arg(chatId)
+				.arg(QString::number(static_cast<qulonglong>(m.vrandom_id().v)))
+				.arg(m.vdate().v)
+				.arg(payload.size())
+				.arg(d.vqts().v)
+				.arg(m.vfile().type() != mtpc_encryptedFileEmpty ? 1 : 0));
+
+			const auto state = LoadSecretChatState(chatId);
+			if (!state.has_value()) {
+				LOG(("1335 SecretChat: no state found for encryptedMessage chat_id=%1")
+					.arg(chatId));
+				break;
+			}
+
+			if (payload.size() < 24) {
+				LOG(("1335 SecretChat: payload too short for encryptedMessage chat_id=%1 size=%2")
+					.arg(chatId)
+					.arg(payload.size()));
+				break;
+			}
+
+			uint64 receivedFingerprint = 0;
+			std::memcpy(&receivedFingerprint, payload.constData(), 8);
+
+			const auto msgKeyHex = payload.mid(8, 16).toHex();
+			const auto encryptedSize = payload.size() - 24;
+
+			LOG(("1335 SecretChat: encryptedMessage envelope "
+				"chat_id=%1 stored_fingerprint=%2 received_fingerprint=%3 msg_key=%4 encrypted_size=%5")
+				.arg(chatId)
+				.arg(QString::number(static_cast<qulonglong>(state->key_fingerprint)))
+				.arg(QString::number(static_cast<qulonglong>(receivedFingerprint)))
+				.arg(QString::fromLatin1(msgKeyHex))
+				.arg(encryptedSize));
+		} break;
+
+		default:
+			LOG(("1335 SecretChat: updateNewEncryptedMessage -> unknown message.type=%1")
+				.arg(int(message.type())));
+		break;
+		}
 	} break;
 
 	case mtpc_updateEncryptedChatTyping: {
