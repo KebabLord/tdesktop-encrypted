@@ -91,12 +91,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 struct SecretChatState {
 	int64 chat_id = 0;
 	uint64 access_hash = 0;
-
 	uint64 admin_id = 0;
 	uint64 participant_id = 0;
-
+	bool is_creator = false;
 	uint64 key_fingerprint = 0;
-
 	MTP::AuthKey::Data auth_key;
 };
 static std::map<uint64, SecretChatState> g_secretChats;
@@ -140,6 +138,7 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 		{ "access_hash", QString::number(static_cast<qulonglong>(state.access_hash)) },
 		{ "admin_id", QString::number(static_cast<qulonglong>(state.admin_id)) },
 		{ "participant_id", QString::number(static_cast<qulonglong>(state.participant_id)) },
+		{ "is_creator", QString::number(static_cast<qulonglong>(state.is_creator)) },
 		{ "key_fingerprint", QString::number(static_cast<qulonglong>(state.key_fingerprint)) },
 		{ "auth_key_hex", AuthKeyToHex(state.auth_key) },
 	};
@@ -220,6 +219,13 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 		return std::nullopt;
 	}
 
+	state.is_creator = object.value("is_creator").toString().toShort(&ok);
+	if (!ok) {
+		LOG(("1337 SecretChat: invalid is_originator in state file %1")
+			.arg(SecretChatStatePath(chatId)));
+		return std::nullopt;
+	}
+
 	state.key_fingerprint = object.value("key_fingerprint").toString().toULongLong(&ok);
 	if (!ok) {
 		LOG(("1337 SecretChat: invalid key_fingerprint in state file %1")
@@ -240,10 +246,6 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 }
 
 // Decryption Helpers
-[[nodiscard]] MTP::AuthKeyPtr MakeSecretChatAuthKey(
-		const SecretChatState &state) {
-	return std::make_shared<MTP::AuthKey>(state.auth_key);
-}
 
 [[nodiscard]] QString HexPrefix(const QByteArray &data, int maxBytes = 64) {
 	return QString::fromLatin1(data.left(maxBytes).toHex());
@@ -257,8 +259,7 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 
 [[nodiscard]] std::optional<QByteArray> DecryptSecretChatPayloadMtproto2(
 		const SecretChatState &state,
-		const QByteArray &payload,
-		int x) {
+		const QByteArray &payload) {
 	if (payload.size() < 24) {
 		LOG(("1335 SecretChat: payload too short for decryption size=%1")
 			.arg(payload.size()));
@@ -277,7 +278,8 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 
 	MTPint256 aesKey, aesIV;
 
-	// Secret chats MTProto 2.0 use x based on sender role, not send/receive direction.
+	// Secret chats MTProto 2.0 use x based on sender role + send/receive direction.
+	int x = state.is_creator ? 8 : 0;
 	{
 		bytes::array<32> sha256_a, sha256_b;
 		bytes::array<16 + 36> data_a;
@@ -2369,7 +2371,7 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				break;
 			}
 
-			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload, 0);
+			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload);
 			if (!decrypted.has_value()) {
 				LOG(("1335 SecretChat: failed to decrypt encryptedMessageService chat_id=%1")
 					.arg(chatId));
@@ -2427,7 +2429,7 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				break;
 			}
 
-			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload, 0);
+			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload);
 			if (!decrypted.has_value()) {
 				LOG(("1335 SecretChat: failed to decrypt encryptedMessage chat_id=%1")
 					.arg(chatId));
@@ -2553,6 +2555,7 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 							state.access_hash = static_cast<uint64>(accepted.vaccess_hash().v);
 							state.admin_id = static_cast<uint64>(accepted.vadmin_id().v);
 							state.participant_id = static_cast<uint64>(accepted.vparticipant_id().v);
+							state.is_creator = false; // Since we in secret-chat requested, we're not the creator.
 							state.key_fingerprint = keyFingerprint;
 							state.auth_key = paddedAuthKey;
 
