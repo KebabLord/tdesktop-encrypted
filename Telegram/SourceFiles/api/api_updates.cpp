@@ -257,6 +257,62 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 	return value;
 }
 
+[[nodiscard]] uint64 ReadLE64(const char *data) {
+	uint64 value = 0;
+	std::memcpy(&value, data, sizeof(value));
+	return value;
+}
+
+[[nodiscard]] QString FormatUint64(uint64 value) {
+	return QString::number(static_cast<qulonglong>(value));
+}
+
+[[nodiscard]] std::optional<QByteArray> ReadTLBytes(
+		const QByteArray &data,
+		int &offset,
+		int limit) {
+	if (offset >= limit) {
+		return std::nullopt;
+	}
+
+	const auto first = static_cast<uchar>(data[offset]);
+	int length = 0;
+	int headerSize = 0;
+
+	if (first < 254) {
+		length = first;
+		headerSize = 1;
+	} else {
+		if (offset + 4 > limit) {
+			return std::nullopt;
+		}
+		length = static_cast<uchar>(data[offset + 1])
+			| (static_cast<uchar>(data[offset + 2]) << 8)
+			| (static_cast<uchar>(data[offset + 3]) << 16);
+		headerSize = 4;
+	}
+
+	const auto padded = ((headerSize + length) + 3) & ~3;
+	if (offset + padded > limit) {
+		return std::nullopt;
+	}
+
+	const auto result = data.mid(offset + headerSize, length);
+	offset += padded;
+	return result;
+}
+
+[[nodiscard]] QString BytesToHex(const QByteArray &data, int maxBytes = -1) {
+	const auto slice = (maxBytes >= 0) ? data.left(maxBytes) : data;
+	return QString::fromLatin1(slice.toHex());
+}
+
+[[nodiscard]] QString FormatUint32Hex(uint32 value) {
+	return QString("0x%1").arg(value, 8, 16, QLatin1Char('0'));
+}
+
+//ParseDecrypted
+
 [[nodiscard]] std::optional<QByteArray> DecryptSecretChatPayloadMtproto2(
 		const SecretChatState &state,
 		const QByteArray &payload) {
@@ -342,40 +398,140 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 	return decrypted;
 }
 
-void LogDecryptedSecretChatPayload(
+void ParseDecryptedSecretChatPayload(
 		int64 chatId,
 		const QByteArray &decrypted,
-		const char *label) {
-	if (decrypted.size() < 28) {
-		LOG(("1335 SecretChat: %1 decrypted payload too short chat_id=%2 size=%3 hex=%4")
-			.arg(label)
+		const char *tag) {
+	LOG(("1335 SecretChat: %1 decrypted payload chat_id=%2 size=%3 hex=%4")
+		.arg(QString::fromLatin1(tag))
+		.arg(chatId)
+		.arg(decrypted.size())
+		.arg(BytesToHex(decrypted, 256)));
+
+	if (decrypted.size() < 4 + 4 + 16 + 4 + 4 + 4 + 4) {
+		LOG(("1335 SecretChat: %1 decrypted payload too small chat_id=%2 size=%3")
+			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
-			.arg(decrypted.size())
-			.arg(HexPrefix(decrypted)));
+			.arg(decrypted.size()));
 		return;
 	}
 
-	const auto *raw = decrypted.constData();
+	const auto usefulLength = int(ReadLE32(decrypted.constData()));
+	const auto outerConstructor = ReadLE32(decrypted.constData() + 4);
 
-	const auto length = ReadLE32(raw + 0);
-	const auto payloadType = ReadLE32(raw + 4);
-	const auto layer = ReadLE32(raw + 8 + 16);      // after min 16 random bytes
-	const auto inSeqNo = ReadLE32(raw + 8 + 16 + 4);
-	const auto outSeqNo = ReadLE32(raw + 8 + 16 + 8);
-	const auto messageType = ReadLE32(raw + 8 + 16 + 12);
-
-	LOG(("1335 SecretChat: %1 decrypted chat_id=%2 "
-		"decrypted_size=%3 length=%4 payload_type=%5 layer=%6 in_seq_no=%7 out_seq_no=%8 message_type=%9 hex_prefix=%10")
-		.arg(label)
+	LOG(("1335 SecretChat: %1 outer chat_id=%2 useful_length=%3 outer_constructor=%4")
+		.arg(QString::fromLatin1(tag))
 		.arg(chatId)
-		.arg(decrypted.size())
-		.arg(length)
-		.arg(payloadType)
+		.arg(usefulLength)
+		.arg(FormatUint32Hex(outerConstructor)));
+
+	if (usefulLength < 0 || (4 + usefulLength) > decrypted.size()) {
+		LOG(("1335 SecretChat: %1 invalid useful_length chat_id=%2 useful_length=%3 decrypted_size=%4")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(usefulLength)
+			.arg(decrypted.size()));
+		return;
+	}
+
+	const auto limit = 4 + usefulLength;
+	const auto randomBytesOffset = 8;
+	const auto randomBytesSize = 16;
+	const auto layerOffset = randomBytesOffset + randomBytesSize;
+
+	const auto layer = ReadLE32(decrypted.constData() + layerOffset);
+	const auto inSeqNo = ReadLE32(decrypted.constData() + layerOffset + 4);
+	const auto outSeqNo = ReadLE32(decrypted.constData() + layerOffset + 8);
+
+	LOG(("1335 SecretChat: %1 layer wrapper chat_id=%2 layer=%3 in_seq_no=%4 out_seq_no=%5 random=%6")
+		.arg(QString::fromLatin1(tag))
+		.arg(chatId)
 		.arg(layer)
 		.arg(inSeqNo)
 		.arg(outSeqNo)
-		.arg(messageType)
-		.arg(HexPrefix(decrypted, 96)));
+		.arg(BytesToHex(decrypted.mid(randomBytesOffset, randomBytesSize))));
+
+	int offset = layerOffset + 12;
+	if (offset + 4 > limit) {
+		LOG(("1335 SecretChat: %1 no inner constructor chat_id=%2")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId));
+		return;
+	}
+
+	const auto innerConstructor = ReadLE32(decrypted.constData() + offset);
+	offset += 4;
+
+	LOG(("1335 SecretChat: %1 inner chat_id=%2 constructor=%3")
+		.arg(QString::fromLatin1(tag))
+		.arg(chatId)
+		.arg(FormatUint32Hex(innerConstructor)));
+
+	// Current observed layout:
+	// constructor
+	// unknown:int32
+	// random_id:int64
+	// ttl:int32
+	// message:string
+	// media:object
+	if (offset + 4 + 8 + 4 > limit) {
+		LOG(("1335 SecretChat: %1 inner payload too short chat_id=%2 offset=%3 limit=%4")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(offset)
+			.arg(limit));
+		return;
+	}
+
+	const auto unknown = ReadLE32(decrypted.constData() + offset);
+	offset += 4;
+
+	const auto randomId = ReadLE64(decrypted.constData() + offset);
+	offset += 8;
+
+	const auto ttl = ReadLE32(decrypted.constData() + offset);
+	offset += 4;
+
+	const auto message = ReadTLBytes(decrypted, offset, limit);
+	if (!message.has_value()) {
+		LOG(("1335 SecretChat: %1 failed to read TL message string chat_id=%2 offset=%3 limit=%4")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(offset)
+			.arg(limit));
+		return;
+	}
+
+	QString messageText = QString::fromUtf8(message->constData(), message->size());
+	if (messageText.isNull()) {
+		messageText = QString();
+	}
+
+	LOG(("1335 SecretChat: %1 decryptedMessage chat_id=%2 unknown=%3 random_id=%4 ttl=%5 text=%6")
+		.arg(QString::fromLatin1(tag))
+		.arg(chatId)
+		.arg(unknown)
+		.arg(FormatUint64(randomId))
+		.arg(ttl)
+		.arg(messageText));
+
+	if (offset + 4 <= limit) {
+		const auto mediaConstructor = ReadLE32(decrypted.constData() + offset);
+		LOG(("1335 SecretChat: %1 media chat_id=%2 constructor=%3 remaining=%4")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(FormatUint32Hex(mediaConstructor))
+			.arg(limit - offset));
+		offset += 4;
+	}
+
+	const auto paddingSize = decrypted.size() - limit;
+	LOG(("1335 SecretChat: %1 parsed chat_id=%2 useful_bytes=%3 padding_bytes=%4 final_offset=%5")
+		.arg(QString::fromLatin1(tag))
+		.arg(chatId)
+		.arg(limit)
+		.arg(paddingSize)
+		.arg(offset));
 }
 
 } // namespace
@@ -2378,7 +2534,7 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				break;
 			}
 
-			LogDecryptedSecretChatPayload(chatId, *decrypted, "encryptedMessageService");
+			ParseDecryptedSecretChatPayload(chatId, *decrypted, "encryptedMessageService");
 		} break;
 
 		case mtpc_encryptedMessage: {
@@ -2436,7 +2592,7 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				break;
 			}
 
-			LogDecryptedSecretChatPayload(chatId, *decrypted, "encryptedMessage");
+			ParseDecryptedSecretChatPayload(chatId, *decrypted, "encryptedMessage");
 		} break;
 
 		default:
