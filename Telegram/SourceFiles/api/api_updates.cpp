@@ -72,6 +72,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "apiwrap.h"
 #include "ui/text/format_values.h" // Ui::FormatPhone
 
+#include "data/secret/secret_chat_manager.h"
+#include "data/secret/secret_chat_storage.h"
+#include "data/secret/secret_chat_state.h"
+
 // To save objects temporarily.
 #include <QByteArray>
 #include <QDir>
@@ -86,28 +90,43 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 // Openssl for sha1
 #include "base/openssl_help.h"
 
-// Temporary global store for the secret chat access
+// Temporary on-disk state for one-to-one secret chats.
+// This is only the cryptographic/session state needed to decrypt incoming payloads.
 #include <map>
+
 struct SecretChatState {
-	int64 chat_id = 0;
-	uint64 access_hash = 0;
-	uint64 admin_id = 0;
-	uint64 participant_id = 0;
-	bool is_creator = false;
-	uint64 key_fingerprint = 0;
-	MTP::AuthKey::Data auth_key;
+	int64 chat_id = 0;              // encryptedChat.id
+	uint64 access_hash = 0;         // encryptedChat.access_hash
+	uint64 admin_id = 0;            // encryptedChat.admin_id
+	uint64 participant_id = 0;      // encryptedChat.participant_id
+	bool is_creator = false;        // true if we started the secret chat
+	uint64 key_fingerprint = 0;     // low 64 bits of SHA1(auth_key)
+	MTP::AuthKey::Data auth_key;    // 256-byte shared secret chat key
 };
+
 static std::map<uint64, SecretChatState> g_secretChats;
 
-// Secret chat storage / state management helpers
 namespace {
 
 constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 
+// Current implementation target: layer 73 secret chat messages.
+// Official docs: decryptedMessageLayer was introduced in layer 17,
+// current inner constructor we observe is decryptedMessage#91cc4674 (layer 73).
+constexpr uint32 kSecretOuterLayerConstructor = 0x1be31789;      // decryptedMessageLayer
+constexpr uint32 kSecretInnerMessageV73 = 0x91cc4674;            // decryptedMessage, layer 73
+constexpr uint32 kSecretInnerServiceV17 = 0x73164160;            // decryptedMessageService
+constexpr uint32 kTlVectorConstructor = 0x1cb5c415;              // vector
+constexpr int kMinSecretRandomBytes = 15;                        // required by docs
+constexpr int kMinMtproto2Padding = 12;                          // required by docs
+constexpr int kMaxMtproto2Padding = 1024;                        // required by docs
+
+// Build the path used to persist one secret chat state.
 [[nodiscard]] QString SecretChatStatePath(int64 chatId) {
 	return QString("%1/%2.json").arg(kSecretChatsDir).arg(chatId);
 }
 
+// Convert auth_key bytes to hex for JSON persistence.
 [[nodiscard]] QString AuthKeyToHex(const MTP::AuthKey::Data &authKey) {
 	const auto raw = QByteArray(
 		reinterpret_cast<const char*>(authKey.data()),
@@ -115,6 +134,7 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 	return QString::fromLatin1(raw.toHex());
 }
 
+// Restore auth_key bytes from persisted hex.
 [[nodiscard]] bool AuthKeyFromHex(
 		const QString &hex,
 		MTP::AuthKey::Data &out) {
@@ -126,6 +146,7 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 	return true;
 }
 
+// Persist current secret chat state to disk so later runs can decrypt messages.
 [[nodiscard]] bool SaveSecretChatState(const SecretChatState &state) {
 	QDir dir;
 	if (!dir.mkpath(kSecretChatsDir)) {
@@ -165,6 +186,7 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 	return true;
 }
 
+// Load previously saved secret chat state for decrypting incoming updates.
 [[nodiscard]] std::optional<SecretChatState> LoadSecretChatState(int64 chatId) {
 	auto file = QFile(SecretChatStatePath(chatId));
 	if (!file.exists()) {
@@ -221,7 +243,7 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 
 	state.is_creator = object.value("is_creator").toString().toShort(&ok);
 	if (!ok) {
-		LOG(("1337 SecretChat: invalid is_originator in state file %1")
+		LOG(("1337 SecretChat: invalid is_creator in state file %1")
 			.arg(SecretChatStatePath(chatId)));
 		return std::nullopt;
 	}
@@ -239,16 +261,25 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 		return std::nullopt;
 	}
 
-	LOG(("1337 SecretChat: loaded state for chat_id=%1 key_fingerprint=%2")
+	LOG(("1337 SecretChat: loaded state for chat_id=%1 key_fingerprint=%2 is_creator=%3")
 		.arg(state.chat_id)
-		.arg(QString::number(static_cast<qulonglong>(state.key_fingerprint))));
+		.arg(QString::number(static_cast<qulonglong>(state.key_fingerprint)))
+		.arg(state.is_creator ? 1 : 0));
 	return state;
 }
 
-// Decryption Helpers
+// Small formatting helpers for logs.
+[[nodiscard]] QString BytesToHex(const QByteArray &data, int maxBytes = -1) {
+	const auto slice = (maxBytes >= 0) ? data.left(maxBytes) : data;
+	return QString::fromLatin1(slice.toHex());
+}
 
-[[nodiscard]] QString HexPrefix(const QByteArray &data, int maxBytes = 64) {
-	return QString::fromLatin1(data.left(maxBytes).toHex());
+[[nodiscard]] QString FormatUint32Hex(uint32 value) {
+	return QString("0x%1").arg(value, 8, 16, QLatin1Char('0'));
+}
+
+[[nodiscard]] QString FormatUint64(uint64 value) {
+	return QString::number(static_cast<qulonglong>(value));
 }
 
 [[nodiscard]] uint32 ReadLE32(const char *data) {
@@ -263,59 +294,188 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 	return value;
 }
 
-[[nodiscard]] QString FormatUint64(uint64 value) {
-	return QString::number(static_cast<qulonglong>(value));
-}
+// A tiny TL reader over an already decrypted payload body.
+// It reads from [offset, limit) and advances only on success.
+struct SecretTlReader {
+	const QByteArray &data;
+	int offset = 0;
+	int limit = 0;
 
-[[nodiscard]] std::optional<QByteArray> ReadTLBytes(
-		const QByteArray &data,
-		int &offset,
-		int limit) {
-	if (offset >= limit) {
-		return std::nullopt;
+	[[nodiscard]] bool CanRead(int bytes) const {
+		return (bytes >= 0) && (offset >= 0) && (offset + bytes <= limit);
 	}
 
-	const auto first = static_cast<uchar>(data[offset]);
-	int length = 0;
-	int headerSize = 0;
-
-	if (first < 254) {
-		length = first;
-		headerSize = 1;
-	} else {
-		if (offset + 4 > limit) {
+	[[nodiscard]] std::optional<uint32> ReadUInt32() {
+		if (!CanRead(4)) {
 			return std::nullopt;
 		}
-		length = static_cast<uchar>(data[offset + 1])
-			| (static_cast<uchar>(data[offset + 2]) << 8)
-			| (static_cast<uchar>(data[offset + 3]) << 16);
-		headerSize = 4;
+		const auto value = ReadLE32(data.constData() + offset);
+		offset += 4;
+		return value;
 	}
 
-	const auto padded = ((headerSize + length) + 3) & ~3;
-	if (offset + padded > limit) {
-		return std::nullopt;
+	[[nodiscard]] std::optional<int32> ReadInt32() {
+		const auto value = ReadUInt32();
+		if (!value.has_value()) {
+			return std::nullopt;
+		}
+		return static_cast<int32>(*value);
 	}
 
-	const auto result = data.mid(offset + headerSize, length);
-	offset += padded;
-	return result;
+	[[nodiscard]] std::optional<uint64> ReadUInt64() {
+		if (!CanRead(8)) {
+			return std::nullopt;
+		}
+		const auto value = ReadLE64(data.constData() + offset);
+		offset += 8;
+		return value;
+	}
+
+	[[nodiscard]] std::optional<QByteArray> ReadTLBytes() {
+		if (!CanRead(1)) {
+			return std::nullopt;
+		}
+
+		const auto first = static_cast<uchar>(data[offset]);
+		int length = 0;
+		int headerSize = 0;
+
+		if (first < 254) {
+			length = first;
+			headerSize = 1;
+		} else {
+			if (!CanRead(4)) {
+				return std::nullopt;
+			}
+			length = static_cast<uchar>(data[offset + 1])
+				| (static_cast<uchar>(data[offset + 2]) << 8)
+				| (static_cast<uchar>(data[offset + 3]) << 16);
+			headerSize = 4;
+		}
+
+		const auto padded = ((headerSize + length) + 3) & ~3;
+		if (!CanRead(padded)) {
+			return std::nullopt;
+		}
+
+		const auto result = data.mid(offset + headerSize, length);
+		offset += padded;
+		return result;
+	}
+
+	[[nodiscard]] std::optional<QString> ReadTLString() {
+		const auto bytes = ReadTLBytes();
+		if (!bytes.has_value()) {
+			return std::nullopt;
+		}
+		return QString::fromUtf8(bytes->constData(), bytes->size());
+	}
+};
+
+// Human-readable names for constructors we already observed.
+[[nodiscard]] QString SecretMessageEntityName(uint32 constructor) {
+	switch (constructor) {
+	case 0xbd610bc9: return QStringLiteral("bold");
+	case 0x826f8b60: return QStringLiteral("italic");
+	case 0x28a20571: return QStringLiteral("code");
+	case 0x73924be0: return QStringLiteral("pre");
+	case 0x32ca960f: return QStringLiteral("spoiler");
+	case 0x9c4e7e8b: return QStringLiteral("strike");
+	case 0xfa04579d: return QStringLiteral("underline");
+	case 0x6ed02538: return QStringLiteral("blockquote");
+	default: return QString("unknown(%1)").arg(FormatUint32Hex(constructor));
+	}
 }
 
-[[nodiscard]] QString BytesToHex(const QByteArray &data, int maxBytes = -1) {
-	const auto slice = (maxBytes >= 0) ? data.left(maxBytes) : data;
-	return QString::fromLatin1(slice.toHex());
+// Best-effort names for secret media constructors we care about first.
+[[nodiscard]] QString SecretMediaConstructorName(uint32 constructor) {
+	switch (constructor) {
+	case 0x089f5c4a: return QStringLiteral("decryptedMessageMediaEmpty");
+	case 0xf1fa8d78: return QStringLiteral("decryptedMessageMediaPhoto");
+	case 0x970c8c0e: return QStringLiteral("decryptedMessageMediaVideo");
+	case 0x7afe8ae2: return QStringLiteral("decryptedMessageMediaDocument");
+	case 0x6abd9782: return QStringLiteral("decryptedMessageMediaDocument(layer143+)");
+	case 0x57e0a9cb: return QStringLiteral("decryptedMessageMediaAudio");
+	case 0xfa95b0dd: return QStringLiteral("decryptedMessageMediaExternalDocument");
+	case 0x8a0df56f: return QStringLiteral("decryptedMessageMediaVenue");
+	case 0xe50511d8: return QStringLiteral("decryptedMessageMediaWebPage");
+	default: return QString("unknown(%1)").arg(FormatUint32Hex(constructor));
+	}
 }
 
-[[nodiscard]] QString FormatUint32Hex(uint32 value) {
-	return QString("0x%1").arg(value, 8, 16, QLatin1Char('0'));
+// Parse and log a Vector<MessageEntity> at the current reader position.
+bool ParseSecretMessageEntities(
+		int64 chatId,
+		const char *tag,
+		SecretTlReader &reader,
+		const QString &messageText) {
+	const auto vectorCtor = reader.ReadUInt32();
+	const auto count = reader.ReadInt32();
+	if (!vectorCtor.has_value() || !count.has_value()) {
+		LOG(("1335 SecretChat: %1 entities header truncated chat_id=%2 offset=%3 limit=%4")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(reader.offset)
+			.arg(reader.limit));
+		return false;
+	}
+	if (*vectorCtor != kTlVectorConstructor || *count < 0) {
+		LOG(("1335 SecretChat: %1 invalid entities vector chat_id=%2 ctor=%3 count=%4")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(FormatUint32Hex(*vectorCtor))
+			.arg(*count));
+		return false;
+	}
+
+	LOG(("1335 SecretChat: %1 entities chat_id=%2 count=%3")
+		.arg(QString::fromLatin1(tag))
+		.arg(chatId)
+		.arg(*count));
+
+	for (int i = 0; i != *count; ++i) {
+		const auto entityCtor = reader.ReadUInt32();
+		const auto entityOffset = reader.ReadInt32();
+		const auto entityLength = reader.ReadInt32();
+		if (!entityCtor.has_value()
+			|| !entityOffset.has_value()
+			|| !entityLength.has_value()) {
+			LOG(("1335 SecretChat: %1 entity truncated chat_id=%2 index=%3 offset=%4 limit=%5")
+				.arg(QString::fromLatin1(tag))
+				.arg(chatId)
+				.arg(i)
+				.arg(reader.offset)
+				.arg(reader.limit));
+			return false;
+		}
+
+		QString entityText;
+		if ((*entityOffset >= 0)
+			&& (*entityLength >= 0)
+			&& (*entityOffset + *entityLength <= messageText.size())) {
+			entityText = messageText.mid(*entityOffset, *entityLength);
+		}
+
+		LOG(("1335 SecretChat: %1 entity chat_id=%2 index=%3 type=%4 offset=%5 length=%6 text=%7")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(i)
+			.arg(SecretMessageEntityName(*entityCtor))
+			.arg(*entityOffset)
+			.arg(*entityLength)
+			.arg(entityText));
+	}
+
+	return true;
 }
 
-//ParseDecrypted
-
+// Decrypt an incoming MTProto 2.0 secret chat payload and validate msg_key.
+// On success, returns the full decrypted block: [length:int32][body][padding].
 [[nodiscard]] std::optional<QByteArray> DecryptSecretChatPayloadMtproto2(
 		const SecretChatState &state,
 		const QByteArray &payload) {
+	// External secret-chat envelope:
+	// [key_fingerprint:8][msg_key:16][encrypted_data:N]
 	if (payload.size() < 24) {
 		LOG(("1335 SecretChat: payload too short for decryption size=%1")
 			.arg(payload.size()));
@@ -334,10 +494,14 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 
 	MTPint256 aesKey, aesIV;
 
-	// Secret chats MTProto 2.0 use x based on sender role + send/receive direction.
-	int x = state.is_creator ? 8 : 0;
+	// MTProto 2.0 secret chats:
+	// x = 0 for messages from the originator, x = 8 for the opposite direction.
+	// We are decrypting incoming messages, so x depends on whether *we* are creator.
+	const int x = state.is_creator ? 8 : 0;
+
 	{
 		bytes::array<32> sha256_a, sha256_b;
+
 		bytes::array<16 + 36> data_a;
 		std::memcpy(data_a.data(), &msgKey, 16);
 		std::memcpy(
@@ -356,9 +520,11 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 
 		auto key = reinterpret_cast<uchar*>(&aesKey);
 		auto iv = reinterpret_cast<uchar*>(&aesIV);
+
 		std::memcpy(key, sha256_a.data(), 8);
 		std::memcpy(key + 8, sha256_b.data() + 8, 16);
 		std::memcpy(key + 24, sha256_a.data() + 24, 8);
+
 		std::memcpy(iv, sha256_b.data(), 8);
 		std::memcpy(iv + 8, sha256_a.data() + 8, 16);
 		std::memcpy(iv + 24, sha256_b.data() + 24, 8);
@@ -372,7 +538,7 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 		&aesKey,
 		&aesIV);
 
-	// Verify msg_key using the same x.
+	// Verify msg_key = SHA256(auth_key[88+x:120+x] + plaintext_with_length_and_padding)[8:24].
 	std::array<uchar, 32> sha256Buffer = { { 0 } };
 	SHA256_CTX msgKeyLargeContext;
 	SHA256_Init(&msgKeyLargeContext);
@@ -393,11 +559,41 @@ constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
 		return std::nullopt;
 	}
 
-	LOG(("1335 SecretChat: MTProto2 msg_key verification passed x=%1")
-		.arg(x));
+	// Validate [length:int32][body][padding] shape after successful decryption.
+	if (decrypted.size() < 4) {
+		LOG(("1335 SecretChat: decrypted payload too small after verify size=%1")
+			.arg(decrypted.size()));
+		return std::nullopt;
+	}
+
+	const auto bodyLength = int(ReadLE32(decrypted.constData()));
+	const auto usedBytes = 4 + bodyLength;
+	if (bodyLength < 0 || usedBytes > decrypted.size()) {
+		LOG(("1335 SecretChat: invalid decrypted body length body_length=%1 decrypted_size=%2")
+			.arg(bodyLength)
+			.arg(decrypted.size()));
+		return std::nullopt;
+	}
+
+	const auto paddingBytes = decrypted.size() - usedBytes;
+	if (paddingBytes < kMinMtproto2Padding || paddingBytes > kMaxMtproto2Padding) {
+		LOG(("1335 SecretChat: invalid MTProto2 padding body_length=%1 padding=%2 decrypted_size=%3")
+			.arg(bodyLength)
+			.arg(paddingBytes)
+			.arg(decrypted.size()));
+		return std::nullopt;
+	}
+
+	LOG(("1335 SecretChat: MTProto2 msg_key verification passed x=%1 body_length=%2 padding=%3")
+		.arg(x)
+		.arg(bodyLength)
+		.arg(paddingBytes));
+
 	return decrypted;
 }
 
+// Parse the decrypted secret-chat plaintext according to the official E2E TL schema.
+// Expected top-level layout: [length:int32][decryptedMessageLayer][padding].
 void ParseDecryptedSecretChatPayload(
 		int64 chatId,
 		const QByteArray &decrypted,
@@ -408,7 +604,7 @@ void ParseDecryptedSecretChatPayload(
 		.arg(decrypted.size())
 		.arg(BytesToHex(decrypted, 256)));
 
-	if (decrypted.size() < 4 + 4 + 16 + 4 + 4 + 4 + 4) {
+	if (decrypted.size() < 4) {
 		LOG(("1335 SecretChat: %1 decrypted payload too small chat_id=%2 size=%3")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
@@ -416,122 +612,230 @@ void ParseDecryptedSecretChatPayload(
 		return;
 	}
 
-	const auto usefulLength = int(ReadLE32(decrypted.constData()));
-	const auto outerConstructor = ReadLE32(decrypted.constData() + 4);
-
-	LOG(("1335 SecretChat: %1 outer chat_id=%2 useful_length=%3 outer_constructor=%4")
-		.arg(QString::fromLatin1(tag))
-		.arg(chatId)
-		.arg(usefulLength)
-		.arg(FormatUint32Hex(outerConstructor)));
-
-	if (usefulLength < 0 || (4 + usefulLength) > decrypted.size()) {
-		LOG(("1335 SecretChat: %1 invalid useful_length chat_id=%2 useful_length=%3 decrypted_size=%4")
+	const auto bodyLength = int(ReadLE32(decrypted.constData()));
+	const auto bodyLimit = 4 + bodyLength;
+	if (bodyLength < 0 || bodyLimit > decrypted.size()) {
+		LOG(("1335 SecretChat: %1 invalid body_length chat_id=%2 body_length=%3 decrypted_size=%4")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
-			.arg(usefulLength)
+			.arg(bodyLength)
 			.arg(decrypted.size()));
 		return;
 	}
 
-	const auto limit = 4 + usefulLength;
-	const auto randomBytesOffset = 8;
-	const auto randomBytesSize = 16;
-	const auto layerOffset = randomBytesOffset + randomBytesSize;
+	SecretTlReader reader{ decrypted, 4, bodyLimit };
 
-	const auto layer = ReadLE32(decrypted.constData() + layerOffset);
-	const auto inSeqNo = ReadLE32(decrypted.constData() + layerOffset + 4);
-	const auto outSeqNo = ReadLE32(decrypted.constData() + layerOffset + 8);
+	// Outer wrapper must be decryptedMessageLayer#1be31789 at modern layers.
+	const auto outerConstructor = reader.ReadUInt32();
+	if (!outerConstructor.has_value()) {
+		LOG(("1335 SecretChat: %1 failed to read outer constructor chat_id=%2")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId));
+		return;
+	}
+	if (*outerConstructor != kSecretOuterLayerConstructor) {
+		LOG(("1335 SecretChat: %1 unexpected outer constructor chat_id=%2 constructor=%3")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(FormatUint32Hex(*outerConstructor)));
+		return;
+	}
 
-	LOG(("1335 SecretChat: %1 layer wrapper chat_id=%2 layer=%3 in_seq_no=%4 out_seq_no=%5 random=%6")
+	const auto randomBytes = reader.ReadTLBytes();
+	const auto layer = reader.ReadInt32();
+	const auto inSeqNo = reader.ReadInt32();
+	const auto outSeqNo = reader.ReadInt32();
+	if (!randomBytes.has_value()
+		|| !layer.has_value()
+		|| !inSeqNo.has_value()
+		|| !outSeqNo.has_value()) {
+		LOG(("1335 SecretChat: %1 outer layer truncated chat_id=%2 offset=%3 limit=%4")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(reader.offset)
+			.arg(reader.limit));
+		return;
+	}
+	if (randomBytes->size() < kMinSecretRandomBytes) {
+		LOG(("1335 SecretChat: %1 random_bytes too short chat_id=%2 random_size=%3")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(randomBytes->size()));
+		return;
+	}
+
+	LOG(("1335 SecretChat: %1 outer chat_id=%2 body_length=%3 layer=%4 in_seq_no=%5 out_seq_no=%6 random_size=%7 random=%8")
 		.arg(QString::fromLatin1(tag))
 		.arg(chatId)
-		.arg(layer)
-		.arg(inSeqNo)
-		.arg(outSeqNo)
-		.arg(BytesToHex(decrypted.mid(randomBytesOffset, randomBytesSize))));
+		.arg(bodyLength)
+		.arg(*layer)
+		.arg(*inSeqNo)
+		.arg(*outSeqNo)
+		.arg(randomBytes->size())
+		.arg(BytesToHex(*randomBytes)));
 
-	int offset = layerOffset + 12;
-	if (offset + 4 > limit) {
-		LOG(("1335 SecretChat: %1 no inner constructor chat_id=%2")
+	const auto innerConstructor = reader.ReadUInt32();
+	if (!innerConstructor.has_value()) {
+		LOG(("1335 SecretChat: %1 missing inner constructor chat_id=%2")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId));
 		return;
 	}
 
-	const auto innerConstructor = ReadLE32(decrypted.constData() + offset);
-	offset += 4;
-
 	LOG(("1335 SecretChat: %1 inner chat_id=%2 constructor=%3")
 		.arg(QString::fromLatin1(tag))
 		.arg(chatId)
-		.arg(FormatUint32Hex(innerConstructor)));
+		.arg(FormatUint32Hex(*innerConstructor)));
 
-	// Current observed layout:
-	// constructor
-	// unknown:int32
-	// random_id:int64
-	// ttl:int32
-	// message:string
-	// media:object
-	if (offset + 4 + 8 + 4 > limit) {
-		LOG(("1335 SecretChat: %1 inner payload too short chat_id=%2 offset=%3 limit=%4")
+	switch (*innerConstructor) {
+	case kSecretInnerMessageV73: {
+		// decryptedMessage#91cc4674
+		const auto flags = reader.ReadUInt32();
+		const auto randomId = reader.ReadUInt64();
+		const auto ttl = reader.ReadInt32();
+		const auto messageText = reader.ReadTLString();
+
+		if (!flags.has_value()
+			|| !randomId.has_value()
+			|| !ttl.has_value()
+			|| !messageText.has_value()) {
+			LOG(("1335 SecretChat: %1 decryptedMessage(v73) truncated chat_id=%2 offset=%3 limit=%4")
+				.arg(QString::fromLatin1(tag))
+				.arg(chatId)
+				.arg(reader.offset)
+				.arg(reader.limit));
+			return;
+		}
+
+		LOG(("1335 SecretChat: %1 decryptedMessage chat_id=%2 flags=%3 no_webpage=%4 silent=%5 random_id=%6 ttl=%7 text=%8")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
-			.arg(offset)
-			.arg(limit));
-		return;
-	}
+			.arg(FormatUint32Hex(*flags))
+			.arg((*flags & (1 << 1)) ? 1 : 0)
+			.arg((*flags & (1 << 5)) ? 1 : 0)
+			.arg(FormatUint64(*randomId))
+			.arg(*ttl)
+			.arg(*messageText));
 
-	const auto unknown = ReadLE32(decrypted.constData() + offset);
-	offset += 4;
+		// flags.9?DecryptedMessageMedia
+		if (*flags & (1 << 9)) {
+			const auto mediaConstructor = reader.ReadUInt32();
+			if (!mediaConstructor.has_value()) {
+				LOG(("1335 SecretChat: %1 media constructor missing chat_id=%2 offset=%3 limit=%4")
+					.arg(QString::fromLatin1(tag))
+					.arg(chatId)
+					.arg(reader.offset)
+					.arg(reader.limit));
+				return;
+			}
+			LOG(("1335 SecretChat: %1 media chat_id=%2 constructor=%3 name=%4 remaining=%5")
+				.arg(QString::fromLatin1(tag))
+				.arg(chatId)
+				.arg(FormatUint32Hex(*mediaConstructor))
+				.arg(SecretMediaConstructorName(*mediaConstructor))
+				.arg(reader.limit - reader.offset));
+			// For now we only identify the typed media constructor.
+			// Actual media body parsing/decryption will be the next stage.
+		} else {
+			LOG(("1335 SecretChat: %1 media chat_id=%2 none")
+				.arg(QString::fromLatin1(tag))
+				.arg(chatId));
+		}
 
-	const auto randomId = ReadLE64(decrypted.constData() + offset);
-	offset += 8;
+		// flags.7?Vector<MessageEntity>
+		if (*flags & (1 << 7)) {
+			if (!ParseSecretMessageEntities(chatId, tag, reader, *messageText)) {
+				return;
+			}
+		}
 
-	const auto ttl = ReadLE32(decrypted.constData() + offset);
-	offset += 4;
+		// flags.11?string via_bot_name
+		if (*flags & (1 << 11)) {
+			const auto viaBotName = reader.ReadTLString();
+			if (!viaBotName.has_value()) {
+				LOG(("1335 SecretChat: %1 via_bot_name truncated chat_id=%2 offset=%3 limit=%4")
+					.arg(QString::fromLatin1(tag))
+					.arg(chatId)
+					.arg(reader.offset)
+					.arg(reader.limit));
+				return;
+			}
+			LOG(("1335 SecretChat: %1 via_bot_name chat_id=%2 value=%3")
+				.arg(QString::fromLatin1(tag))
+				.arg(chatId)
+				.arg(*viaBotName));
+		}
 
-	const auto message = ReadTLBytes(decrypted, offset, limit);
-	if (!message.has_value()) {
-		LOG(("1335 SecretChat: %1 failed to read TL message string chat_id=%2 offset=%3 limit=%4")
+		// flags.3?long reply_to_random_id
+		if (*flags & (1 << 3)) {
+			const auto replyToRandomId = reader.ReadUInt64();
+			if (!replyToRandomId.has_value()) {
+				LOG(("1335 SecretChat: %1 reply_to_random_id truncated chat_id=%2 offset=%3 limit=%4")
+					.arg(QString::fromLatin1(tag))
+					.arg(chatId)
+					.arg(reader.offset)
+					.arg(reader.limit));
+				return;
+			}
+			LOG(("1335 SecretChat: %1 reply_to_random_id chat_id=%2 value=%3")
+				.arg(QString::fromLatin1(tag))
+				.arg(chatId)
+				.arg(FormatUint64(*replyToRandomId)));
+		}
+
+		// flags.17?long grouped_id
+		if (*flags & (1 << 17)) {
+			const auto groupedId = reader.ReadUInt64();
+			if (!groupedId.has_value()) {
+				LOG(("1335 SecretChat: %1 grouped_id truncated chat_id=%2 offset=%3 limit=%4")
+					.arg(QString::fromLatin1(tag))
+					.arg(chatId)
+					.arg(reader.offset)
+					.arg(reader.limit));
+				return;
+			}
+			LOG(("1335 SecretChat: %1 grouped_id chat_id=%2 value=%3")
+				.arg(QString::fromLatin1(tag))
+				.arg(chatId)
+				.arg(FormatUint64(*groupedId)));
+		}
+	} break;
+
+	case kSecretInnerServiceV17: {
+		// decryptedMessageService#73164160
+		const auto randomId = reader.ReadUInt64();
+		const auto actionConstructor = reader.ReadUInt32();
+		if (!randomId.has_value() || !actionConstructor.has_value()) {
+			LOG(("1335 SecretChat: %1 decryptedMessageService truncated chat_id=%2 offset=%3 limit=%4")
+				.arg(QString::fromLatin1(tag))
+				.arg(chatId)
+				.arg(reader.offset)
+				.arg(reader.limit));
+			return;
+		}
+
+		LOG(("1335 SecretChat: %1 decryptedMessageService chat_id=%2 random_id=%3 action_constructor=%4")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
-			.arg(offset)
-			.arg(limit));
-		return;
+			.arg(FormatUint64(*randomId))
+			.arg(FormatUint32Hex(*actionConstructor)));
+	} break;
+
+	default:
+		LOG(("1335 SecretChat: %1 unsupported inner constructor chat_id=%2 constructor=%3")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId)
+			.arg(FormatUint32Hex(*innerConstructor)));
+		break;
 	}
 
-	QString messageText = QString::fromUtf8(message->constData(), message->size());
-	if (messageText.isNull()) {
-		messageText = QString();
-	}
-
-	LOG(("1335 SecretChat: %1 decryptedMessage chat_id=%2 unknown=%3 random_id=%4 ttl=%5 text=%6")
+	const auto paddingBytes = decrypted.size() - bodyLimit;
+	LOG(("1335 SecretChat: %1 parsed chat_id=%2 body_bytes=%3 padding_bytes=%4 final_offset=%5")
 		.arg(QString::fromLatin1(tag))
 		.arg(chatId)
-		.arg(unknown)
-		.arg(FormatUint64(randomId))
-		.arg(ttl)
-		.arg(messageText));
-
-	if (offset + 4 <= limit) {
-		const auto mediaConstructor = ReadLE32(decrypted.constData() + offset);
-		LOG(("1335 SecretChat: %1 media chat_id=%2 constructor=%3 remaining=%4")
-			.arg(QString::fromLatin1(tag))
-			.arg(chatId)
-			.arg(FormatUint32Hex(mediaConstructor))
-			.arg(limit - offset));
-		offset += 4;
-	}
-
-	const auto paddingSize = decrypted.size() - limit;
-	LOG(("1335 SecretChat: %1 parsed chat_id=%2 useful_bytes=%3 padding_bytes=%4 final_offset=%5")
-		.arg(QString::fromLatin1(tag))
-		.arg(chatId)
-		.arg(limit)
-		.arg(paddingSize)
-		.arg(offset));
+		.arg(bodyLimit)
+		.arg(paddingBytes)
+		.arg(reader.offset));
 }
 
 } // namespace
@@ -2493,48 +2797,10 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				.arg(payload.size())
 				.arg(d.vqts().v));
 
-			const auto state = LoadSecretChatState(chatId);
-			if (!state.has_value()) {
-				LOG(("1335 SecretChat: no state found for encryptedMessageService chat_id=%1")
-					.arg(chatId));
-				break;
-			}
-
-			if (payload.size() < 24) {
-				LOG(("1335 SecretChat: payload too short for encryptedMessageService chat_id=%1 size=%2")
-					.arg(chatId)
-					.arg(payload.size()));
-				break;
-			}
-
-			uint64 receivedFingerprint = 0;
-			std::memcpy(&receivedFingerprint, payload.constData(), 8);
-
-			const auto msgKeyHex = payload.mid(8, 16).toHex();
-			const auto encryptedSize = payload.size() - 24;
-
-			LOG(("1335 SecretChat: encryptedMessageService envelope "
-				"chat_id=%1 stored_fingerprint=%2 received_fingerprint=%3 msg_key=%4 encrypted_size=%5")
-				.arg(chatId)
-				.arg(QString::number(static_cast<qulonglong>(state->key_fingerprint)))
-				.arg(QString::number(static_cast<qulonglong>(receivedFingerprint)))
-				.arg(QString::fromLatin1(msgKeyHex))
-				.arg(encryptedSize));
-
-			if (receivedFingerprint != state->key_fingerprint) {
-				LOG(("1335 SecretChat: fingerprint mismatch for encryptedMessageService chat_id=%1")
-					.arg(chatId));
-				break;
-			}
-
-			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload);
-			if (!decrypted.has_value()) {
-				LOG(("1335 SecretChat: failed to decrypt encryptedMessageService chat_id=%1")
-					.arg(chatId));
-				break;
-			}
-
-			ParseDecryptedSecretChatPayload(chatId, *decrypted, "encryptedMessageService");
+			Data::SecretChats::Manager(&session()).HandleEncryptedMessage(
+				chatId,
+				payload,
+				"encryptedMessageService");
 		} break;
 
 		case mtpc_encryptedMessage: {
@@ -2551,48 +2817,10 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				.arg(d.vqts().v)
 				.arg(m.vfile().type() != mtpc_encryptedFileEmpty ? 1 : 0));
 
-			const auto state = LoadSecretChatState(chatId);
-			if (!state.has_value()) {
-				LOG(("1335 SecretChat: no state found for encryptedMessage chat_id=%1")
-					.arg(chatId));
-				break;
-			}
-
-			if (payload.size() < 24) {
-				LOG(("1335 SecretChat: payload too short for encryptedMessage chat_id=%1 size=%2")
-					.arg(chatId)
-					.arg(payload.size()));
-				break;
-			}
-
-			uint64 receivedFingerprint = 0;
-			std::memcpy(&receivedFingerprint, payload.constData(), 8);
-
-			const auto msgKeyHex = payload.mid(8, 16).toHex();
-			const auto encryptedSize = payload.size() - 24;
-
-			LOG(("1335 SecretChat: encryptedMessage envelope "
-				"chat_id=%1 stored_fingerprint=%2 received_fingerprint=%3 msg_key=%4 encrypted_size=%5")
-				.arg(chatId)
-				.arg(QString::number(static_cast<qulonglong>(state->key_fingerprint)))
-				.arg(QString::number(static_cast<qulonglong>(receivedFingerprint)))
-				.arg(QString::fromLatin1(msgKeyHex))
-				.arg(encryptedSize));
-
-			if (receivedFingerprint != state->key_fingerprint) {
-				LOG(("1335 SecretChat: fingerprint mismatch for encryptedMessage chat_id=%1")
-					.arg(chatId));
-				break;
-			}
-
-			const auto decrypted = DecryptSecretChatPayloadMtproto2(*state, payload);
-			if (!decrypted.has_value()) {
-				LOG(("1335 SecretChat: failed to decrypt encryptedMessage chat_id=%1")
-					.arg(chatId));
-				break;
-			}
-
-			ParseDecryptedSecretChatPayload(chatId, *decrypted, "encryptedMessage");
+			Data::SecretChats::Manager(&session()).HandleEncryptedMessage(
+				chatId,
+				payload,
+				"encryptedMessage");
 		} break;
 
 		default:
@@ -2706,16 +2934,16 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 								.arg(accepted.vkey_fingerprint().v)
 								.arg(accepted.vg_a_or_b().v.size()));
 
-							SecretChatState state;
+							Data::SecretChats::SecretChatState state;
 							state.chat_id = accepted.vid().v;
 							state.access_hash = static_cast<uint64>(accepted.vaccess_hash().v);
 							state.admin_id = static_cast<uint64>(accepted.vadmin_id().v);
 							state.participant_id = static_cast<uint64>(accepted.vparticipant_id().v);
-							state.is_creator = false; // Since we in secret-chat requested, we're not the creator.
+							state.is_creator = false; // The remote side requested this chat; we are the acceptor, not the originator.
 							state.key_fingerprint = keyFingerprint;
 							state.auth_key = paddedAuthKey;
 
-							if (!SaveSecretChatState(state)) {
+							if (!Data::SecretChats::Manager(&session()).SaveState(state)) {
 								LOG(("1337 SecretChat: state save failed after acceptEncryption"));
 							}
 						} break;

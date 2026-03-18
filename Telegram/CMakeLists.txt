@@ -724,6 +724,12 @@ PRIVATE
     data/data_wall_paper.h
     data/data_web_page.cpp
     data/data_web_page.h
+    data/secret/secret_chat_state.cpp
+    data/secret/secret_chat_storage.cpp
+    data/secret/secret_chat_tl.cpp
+    data/secret/secret_chat_crypto.cpp
+    data/secret/secret_chat_parser.cpp
+    data/secret/secret_chat_manager.cpp
     dialogs/ui/dialogs_layout.cpp
     dialogs/ui/dialogs_layout.h
     dialogs/ui/dialogs_message_view.cpp
