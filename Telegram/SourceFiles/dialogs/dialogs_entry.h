@@ -59,6 +59,7 @@ public:
 		Folder,
 		ForumTopic,
 		SavedSublist,
+		SecretChat,
 	};
 	Entry(not_null<Data::Session*> owner, Type type);
 	virtual ~Entry();
@@ -173,6 +174,7 @@ private:
 		IsSavedSublist = (1 << 3),
 		UpdatePostponed = (1 << 4),
 		InUnreadChangeBlock = (1 << 5),
+		IsFolder = (1 << 6),
 	};
 	friend inline constexpr bool is_flag_type(Flag) { return true; }
 	using Flags = base::flags<Flag>;

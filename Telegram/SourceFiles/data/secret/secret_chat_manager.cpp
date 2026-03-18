@@ -1,9 +1,11 @@
 #include "data/secret/secret_chat_manager.h"
+#include "data/data_session.h"
 #include "data/secret/secret_chat_crypto.h"
 #include "data/secret/secret_chat_parser.h"
 #include "data/secret/secret_chat_storage.h"
 #include "data/secret/secret_chat_types.h"
 
+#include "dialogs/secret_chat_entry.h"
 #include "logs.h"
 #include "main/main_session.h"
 #include "mtproto/mtproto_config.h"
@@ -21,6 +23,7 @@ SecretChatManager::SecretChatManager(not_null<Main::Session*> session)
 
 void SecretChatManager::RefreshKnownChats() {
 	_knownChats = LoadAllSecretChats();
+	RebuildChatListEntries();
 }
 
 void SecretChatManager::HandleEncryptedMessage(
@@ -295,6 +298,24 @@ const QVector<SecretChatDescriptor> &SecretChatManager::KnownChats() const {
 
 std::optional<SecretChatState> SecretChatManager::LoadState(int64_t chatId) const {
 	return LoadSecretChatState(chatId);
+}
+
+void SecretChatManager::RebuildChatListEntries() {
+	auto &data = _session->data();
+	const auto list = data.chatsList();
+
+	for (auto &[chatId, entry] : _entries) {
+		entry->removeFromChatList(FilterId(0), list);
+	}
+	_entries.clear();
+
+	for (const auto &chat : _knownChats) {
+		auto entry = std::make_unique<Dialogs::SecretChatEntry>(
+			&data,
+			chat.chatId);
+		entry->addToChatList(FilterId(0), list);
+		_entries.emplace(chat.chatId, std::move(entry));
+	}
 }
 
 SecretChatManager &Manager(not_null<Main::Session*> session) {

@@ -770,6 +770,8 @@ PRIVATE
     dialogs/dialogs_top_bar_suggestion.h
     dialogs/dialogs_widget.cpp
     dialogs/dialogs_widget.h
+    dialogs/secret_chat_entry.h
+    dialogs/secret_chat_entry.cpp
     editor/color_picker.cpp
     editor/color_picker.h
     editor/controllers/controllers.h

@@ -87,6 +87,8 @@ Entry::Entry(not_null<Data::Session*> owner, Type type)
 	? (Flag::IsThread | Flag::IsForumTopic)
 	: (type == Type::SavedSublist)
 	? (Flag::IsThread | Flag::IsSavedSublist)
+	: (type == Type::Folder)
+	? Flag::IsFolder
 	: Flag(0)) {
 }
 
@@ -113,9 +115,9 @@ Data::Forum *Entry::asForum() {
 }
 
 Data::Folder *Entry::asFolder() {
-	return (_flags & Flag::IsThread)
-		? nullptr
-		: static_cast<Data::Folder*>(this);
+	return (_flags & Flag::IsFolder)
+		? static_cast<Data::Folder*>(this)
+		: nullptr;
 }
 
 Data::Thread *Entry::asThread() {

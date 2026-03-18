@@ -6,10 +6,15 @@
 #include <QMap>
 #include <QVector>
 #include <optional>
+#include <memory>
 
 namespace Main {
 class Session;
 } // namespace Main
+
+namespace Dialogs {
+class SecretChatEntry;
+} // namespace Dialogs
 
 namespace Data::SecretChats {
 
@@ -37,13 +42,15 @@ public:
 	const QVector<SecretParsedMessage> &Messages(int64_t chatId) const;
 	const QVector<SecretChatDescriptor> &KnownChats() const;
 
-
 private:
 	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);
 	void RefreshKnownChats();
+	void RebuildChatListEntries();
+
 	not_null<Main::Session*> _session;
 	QMap<int64_t, QVector<SecretParsedMessage>> _messages;
 	QVector<SecretChatDescriptor> _knownChats;
+	std::map<int64_t, std::unique_ptr<Dialogs::SecretChatEntry>> _entries;
 };
 
 SecretChatManager &Manager(not_null<Main::Session*> session);
