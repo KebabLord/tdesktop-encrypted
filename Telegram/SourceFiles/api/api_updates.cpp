@@ -76,20 +76,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/secret/secret_chat_storage.h"
 #include "data/secret/secret_chat_state.h"
 
-// To save objects temporarily.
-#include <QByteArray>
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QSaveFile>
-#include <optional>
-#include <cstring>
-
-// Openssl for sha1
-#include "base/openssl_help.h"
-
 
 
 namespace Api {
