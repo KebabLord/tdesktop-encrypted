@@ -1,8 +1,10 @@
 #pragma once
 
 #include "data/secret/secret_chat_state.h"
-#include "main/main_session.h"
+#include "data/secret/secret_chat_types.h"
 
+#include <QMap>
+#include <QVector>
 #include <optional>
 
 namespace Main {
@@ -33,8 +35,13 @@ public:
 	bool SaveState(const SecretChatState &state) const;
 	std::optional<SecretChatState> LoadState(int64_t chatId) const;
 
+	const QVector<SecretParsedMessage> &Messages(int64_t chatId) const;
+
 private:
+	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);
+
 	not_null<Main::Session*> _session;
+	QMap<int64_t, QVector<SecretParsedMessage>> _messages;
 };
 
 SecretChatManager &Manager(not_null<Main::Session*> session);

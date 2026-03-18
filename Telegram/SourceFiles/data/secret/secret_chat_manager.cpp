@@ -1,12 +1,16 @@
 #include "data/secret/secret_chat_manager.h"
-#include "base/openssl_help.h"
 #include "data/secret/secret_chat_crypto.h"
 #include "data/secret/secret_chat_parser.h"
 #include "data/secret/secret_chat_storage.h"
+#include "data/secret/secret_chat_types.h"
+
 #include "logs.h"
+#include "main/main_session.h"
 #include "mtproto/mtproto_config.h"
 #include "mtproto/mtproto_dh_utils.h"
 #include "apiwrap.h"
+
+#include "base/openssl_help.h"
 
 namespace Data::SecretChats {
 
@@ -63,7 +67,15 @@ void SecretChatManager::HandleEncryptedMessage(
 		return;
 	}
 
-	ParseDecryptedSecretChatPayload(chatId, *decrypted, tag);
+	const auto parsed = ParseDecryptedSecretChatPayload(chatId, *decrypted, tag);
+	if (!parsed.has_value()) {
+		LOG(("1335 SecretChat: failed to parse %1 chat_id=%2")
+			.arg(QString::fromLatin1(tag))
+			.arg(chatId));
+		return;
+	}
+
+	StoreParsedMessage(chatId, *parsed);
 }
 
 void SecretChatManager::HandleEncryptedChatRequested(
@@ -275,6 +287,22 @@ std::optional<SecretChatState> SecretChatManager::LoadState(int64_t chatId) cons
 SecretChatManager &Manager(not_null<Main::Session*> session) {
 	static auto manager = std::make_unique<SecretChatManager>(session);
 	return *manager;
+}
+
+void SecretChatManager::StoreParsedMessage(
+		int64_t chatId,
+		SecretParsedMessage message) {
+	auto &list = _messages[chatId];
+	list.push_back(std::move(message));
+	LOG(("1335 SecretChat: stored parsed message chat_id=%1 total=%2")
+		.arg(chatId)
+		.arg(list.size()));
+}
+
+const QVector<SecretParsedMessage> &SecretChatManager::Messages(int64_t chatId) const {
+	static const QVector<SecretParsedMessage> kEmpty;
+	const auto i = _messages.find(chatId);
+	return (i == _messages.end()) ? kEmpty : i.value();
 }
 
 } // namespace Data::SecretChats

@@ -2,16 +2,19 @@
 
 #include "data/secret/secret_chat_state.h"
 #include "data/secret/secret_chat_tl.h"
+#include "data/secret/secret_chat_types.h"
 #include "logs.h"
 
 namespace Data::SecretChats {
 namespace {
 
-bool ParseSecretMessageEntities(
+std::optional<QVector<SecretParsedEntity>> ParseSecretMessageEntities(
 		int64_t chatId,
 		const char *tag,
 		SecretTlReader &reader,
 		const QString &messageText) {
+	QVector<SecretParsedEntity> result;
+
 	const auto vectorCtor = reader.ReadUInt32();
 	const auto count = reader.ReadInt32();
 	if (!vectorCtor.has_value() || !count.has_value()) {
@@ -20,7 +23,7 @@ bool ParseSecretMessageEntities(
 			.arg(chatId)
 			.arg(reader.offset)
 			.arg(reader.limit));
-		return false;
+		return std::nullopt;
 	}
 	if (*vectorCtor != kTlVectorConstructor || *count < 0) {
 		LOG(("1335 SecretChat: %1 invalid entities vector chat_id=%2 ctor=%3 count=%4")
@@ -28,13 +31,15 @@ bool ParseSecretMessageEntities(
 			.arg(chatId)
 			.arg(FormatUint32Hex(*vectorCtor))
 			.arg(*count));
-		return false;
+		return std::nullopt;
 	}
 
 	LOG(("1335 SecretChat: %1 entities chat_id=%2 count=%3")
 		.arg(QString::fromLatin1(tag))
 		.arg(chatId)
 		.arg(*count));
+
+	result.reserve(*count);
 
 	for (int i = 0; i != *count; ++i) {
 		const auto entityCtor = reader.ReadUInt32();
@@ -49,7 +54,7 @@ bool ParseSecretMessageEntities(
 				.arg(i)
 				.arg(reader.offset)
 				.arg(reader.limit));
-			return false;
+			return std::nullopt;
 		}
 
 		QString entityText;
@@ -67,14 +72,20 @@ bool ParseSecretMessageEntities(
 			.arg(*entityOffset)
 			.arg(*entityLength)
 			.arg(entityText));
+
+		result.push_back(SecretParsedEntity{
+			.constructor = *entityCtor,
+			.offset = *entityOffset,
+			.length = *entityLength,
+		});
 	}
 
-	return true;
+	return result;
 }
 
 } // namespace
 
-void ParseDecryptedSecretChatPayload(
+std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 		int64_t chatId,
 		const QByteArray &decrypted,
 		const char *tag) {
@@ -89,7 +100,7 @@ void ParseDecryptedSecretChatPayload(
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
 			.arg(decrypted.size()));
-		return;
+		return std::nullopt;
 	}
 
 	const auto bodyLength = int(ReadLE32(decrypted.constData()));
@@ -100,7 +111,7 @@ void ParseDecryptedSecretChatPayload(
 			.arg(chatId)
 			.arg(bodyLength)
 			.arg(decrypted.size()));
-		return;
+		return std::nullopt;
 	}
 
 	SecretTlReader reader{ decrypted, 4, bodyLimit };
@@ -110,14 +121,14 @@ void ParseDecryptedSecretChatPayload(
 		LOG(("1335 SecretChat: %1 failed to read outer constructor chat_id=%2")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId));
-		return;
+		return std::nullopt;
 	}
 	if (*outerConstructor != kSecretOuterLayerConstructor) {
 		LOG(("1335 SecretChat: %1 unexpected outer constructor chat_id=%2 constructor=%3")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
 			.arg(FormatUint32Hex(*outerConstructor)));
-		return;
+		return std::nullopt;
 	}
 
 	const auto randomBytes = reader.ReadTLBytes();
@@ -133,14 +144,14 @@ void ParseDecryptedSecretChatPayload(
 			.arg(chatId)
 			.arg(reader.offset)
 			.arg(reader.limit));
-		return;
+		return std::nullopt;
 	}
 	if (randomBytes->size() < kMinSecretRandomBytes) {
 		LOG(("1335 SecretChat: %1 random_bytes too short chat_id=%2 random_size=%3")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
 			.arg(randomBytes->size()));
-		return;
+		return std::nullopt;
 	}
 
 	LOG(("1335 SecretChat: %1 outer chat_id=%2 body_length=%3 layer=%4 in_seq_no=%5 out_seq_no=%6 random_size=%7 random=%8")
@@ -158,7 +169,7 @@ void ParseDecryptedSecretChatPayload(
 		LOG(("1335 SecretChat: %1 missing inner constructor chat_id=%2")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId));
-		return;
+		return std::nullopt;
 	}
 
 	LOG(("1335 SecretChat: %1 inner chat_id=%2 constructor=%3")
@@ -182,7 +193,7 @@ void ParseDecryptedSecretChatPayload(
 				.arg(chatId)
 				.arg(reader.offset)
 				.arg(reader.limit));
-			return;
+			return std::nullopt;
 		}
 
 		LOG(("1335 SecretChat: %1 decryptedMessage chat_id=%2 flags=%3 no_webpage=%4 silent=%5 random_id=%6 ttl=%7 text=%8")
@@ -203,7 +214,7 @@ void ParseDecryptedSecretChatPayload(
 					.arg(chatId)
 					.arg(reader.offset)
 					.arg(reader.limit));
-				return;
+				return std::nullopt;
 			}
 			LOG(("1335 SecretChat: %1 media chat_id=%2 constructor=%3 name=%4 remaining=%5")
 				.arg(QString::fromLatin1(tag))
@@ -211,16 +222,25 @@ void ParseDecryptedSecretChatPayload(
 				.arg(FormatUint32Hex(*mediaConstructor))
 				.arg(SecretMediaConstructorName(*mediaConstructor))
 				.arg(reader.limit - reader.offset));
-		} else {
-			LOG(("1335 SecretChat: %1 media chat_id=%2 none")
-				.arg(QString::fromLatin1(tag))
-				.arg(chatId));
+
+			return SecretParsedUnsupportedMessage{
+				.chatId = chatId,
+				.constructor = *mediaConstructor,
+				.description = SecretMediaConstructorName(*mediaConstructor),
+			};
 		}
 
+		QVector<SecretParsedEntity> entities;
 		if (*flags & (1 << 7)) {
-			if (!ParseSecretMessageEntities(chatId, tag, reader, *messageText)) {
-				return;
+			const auto parsedEntities = ParseSecretMessageEntities(
+				chatId,
+				tag,
+				reader,
+				*messageText);
+			if (!parsedEntities.has_value()) {
+				return std::nullopt;
 			}
+			entities = *parsedEntities;
 		}
 
 		if (*flags & (1 << 11)) {
@@ -231,7 +251,7 @@ void ParseDecryptedSecretChatPayload(
 					.arg(chatId)
 					.arg(reader.offset)
 					.arg(reader.limit));
-				return;
+				return std::nullopt;
 			}
 			LOG(("1335 SecretChat: %1 via_bot_name chat_id=%2 value=%3")
 				.arg(QString::fromLatin1(tag))
@@ -247,7 +267,7 @@ void ParseDecryptedSecretChatPayload(
 					.arg(chatId)
 					.arg(reader.offset)
 					.arg(reader.limit));
-				return;
+				return std::nullopt;
 			}
 			LOG(("1335 SecretChat: %1 reply_to_random_id chat_id=%2 value=%3")
 				.arg(QString::fromLatin1(tag))
@@ -263,14 +283,23 @@ void ParseDecryptedSecretChatPayload(
 					.arg(chatId)
 					.arg(reader.offset)
 					.arg(reader.limit));
-				return;
+				return std::nullopt;
 			}
 			LOG(("1335 SecretChat: %1 grouped_id chat_id=%2 value=%3")
 				.arg(QString::fromLatin1(tag))
 				.arg(chatId)
 				.arg(FormatUint64(*groupedId)));
 		}
-	} break;
+
+		return SecretParsedTextMessage{
+			.chatId = chatId,
+			.randomId = *randomId,
+			.flags = *flags,
+			.ttl = *ttl,
+			.text = *messageText,
+			.entities = std::move(entities),
+		};
+	}
 
 	case kSecretInnerServiceV17: {
 		const auto randomId = reader.ReadUInt64();
@@ -281,7 +310,7 @@ void ParseDecryptedSecretChatPayload(
 				.arg(chatId)
 				.arg(reader.offset)
 				.arg(reader.limit));
-			return;
+			return std::nullopt;
 		}
 
 		LOG(("1335 SecretChat: %1 decryptedMessageService chat_id=%2 random_id=%3 action_constructor=%4")
@@ -289,23 +318,26 @@ void ParseDecryptedSecretChatPayload(
 			.arg(chatId)
 			.arg(FormatUint64(*randomId))
 			.arg(FormatUint32Hex(*actionConstructor)));
-	} break;
+
+		return SecretParsedServiceMessage{
+			.chatId = chatId,
+			.randomId = *randomId,
+			.actionConstructor = *actionConstructor,
+		};
+	}
 
 	default:
 		LOG(("1335 SecretChat: %1 unsupported inner constructor chat_id=%2 constructor=%3")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
 			.arg(FormatUint32Hex(*innerConstructor)));
-		break;
-	}
 
-	const auto paddingBytes = decrypted.size() - bodyLimit;
-	LOG(("1335 SecretChat: %1 parsed chat_id=%2 body_bytes=%3 padding_bytes=%4 final_offset=%5")
-		.arg(QString::fromLatin1(tag))
-		.arg(chatId)
-		.arg(bodyLimit)
-		.arg(paddingBytes)
-		.arg(reader.offset));
+		return SecretParsedUnsupportedMessage{
+			.chatId = chatId,
+			.constructor = *innerConstructor,
+			.description = QString("inner %1").arg(FormatUint32Hex(*innerConstructor)),
+		};
+	}
 }
 
 } // namespace Data::SecretChats
