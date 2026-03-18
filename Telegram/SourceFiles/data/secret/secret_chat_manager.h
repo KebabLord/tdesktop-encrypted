@@ -34,14 +34,16 @@ public:
 
 	bool SaveState(const SecretChatState &state) const;
 	std::optional<SecretChatState> LoadState(int64_t chatId) const;
-
 	const QVector<SecretParsedMessage> &Messages(int64_t chatId) const;
+	const QVector<SecretChatDescriptor> &KnownChats() const;
+
 
 private:
 	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);
-
+	void RefreshKnownChats();
 	not_null<Main::Session*> _session;
 	QMap<int64_t, QVector<SecretParsedMessage>> _messages;
+	QVector<SecretChatDescriptor> _knownChats;
 };
 
 SecretChatManager &Manager(not_null<Main::Session*> session);
