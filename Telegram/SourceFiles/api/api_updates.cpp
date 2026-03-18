@@ -2088,189 +2088,32 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 	case mtpc_updateEncryption: {
 		const auto &d = update.c_updateEncryption();
 		const auto &chat = d.vchat();
+		auto &secretManager = Data::SecretChats::Manager(&session());
 
 		switch (chat.type()) {
 		case mtpc_encryptedChatRequested: {
 			const auto &c = chat.c_encryptedChatRequested();
 
-			// Copy request fields before async work.
-			const auto requestedChatId = c.vid().v;
-			const auto requestedAccessHash = c.vaccess_hash().v;
-			const auto requestedAdminId = c.vadmin_id().v;
-			const auto requestedParticipantId = c.vparticipant_id().v;
-			const auto requestedGA = c.vg_a().v;
-
-			LOG(("1337 SecretChat: updateEncryption -> encryptedChatRequested "
-				"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 g_a_size=%6")
-				.arg(requestedChatId)
-				.arg(requestedAccessHash)
-				.arg(requestedAdminId)
-				.arg(requestedParticipantId)
-				.arg(c.vdate().v)
-				.arg(requestedGA.size()));
-
-			// Fetch DH config, generate g_b, compute shared auth_key, then accept.
-			session().api().request(MTPmessages_GetDhConfig(
-				MTP_int(0),
-				MTP_int(MTP::ModExpFirst::kRandomPowerSize)
-			)).done([=](const MTPmessages_DhConfig &result) {
-				result.match([&](const MTPDmessages_dhConfig &data) {
-					LOG(("1337 SecretChat: getDhConfig -> dhConfig "
-						"g=%1 p_size=%2 version=%3 random_size=%4")
-						.arg(data.vg().v)
-						.arg(data.vp().v.size())
-						.arg(data.vversion().v)
-						.arg(data.vrandom().v.size()));
-
-					auto primeBytes = bytes::make_vector(data.vp().v);
-					if (!MTP::IsPrimeAndGood(primeBytes, data.vg().v)) {
-						LOG(("1337 SecretChat: bad p/g in dhConfig"));
-						return;
-					}
-
-					const auto modexp = MTP::CreateModExp(
-						data.vg().v,
-						primeBytes,
-						bytes::make_span(data.vrandom().v));
-
-					if (modexp.modexp.empty()) {
-						LOG(("1337 SecretChat: CreateModExp failed"));
-						return;
-					}
-
-					const auto computedAuthKey = MTP::CreateAuthKey(
-						bytes::make_span(requestedGA),
-						modexp.randomPower,
-						primeBytes);
-
-					if (computedAuthKey.empty()) {
-						LOG(("1337 SecretChat: CreateAuthKey failed"));
-						return;
-					}
-
-					MTP::AuthKey::Data paddedAuthKey = {};
-					MTP::AuthKey::FillData(paddedAuthKey, computedAuthKey);
-
-					const auto authKeySha1 = openssl::Sha1(bytes::make_span(paddedAuthKey));
-
-					uint64 keyFingerprint = 0;
-					std::memcpy(&keyFingerprint, authKeySha1.data() + 12, 8);
-
-					LOG(("1337 SecretChat: computed incoming accept values "
-						"g_b_size=%1 shared_key_size=%2 padded_key_size=%3 key_fingerprint=%4")
-						.arg(modexp.modexp.size())
-						.arg(computedAuthKey.size())
-						.arg(int(MTP::AuthKey::kSize))
-						.arg(QString::number(static_cast<qulonglong>(keyFingerprint))));
-
-					session().api().request(MTPmessages_AcceptEncryption(
-						MTP_inputEncryptedChat(
-							MTP_int(requestedChatId),
-							MTP_long(requestedAccessHash)
-						),
-						MTP_bytes(modexp.modexp),
-						MTP_long(static_cast<uint64>(keyFingerprint))
-					)).done([=](const MTPEncryptedChat &result) {
-						switch (result.type()) {
-						case mtpc_encryptedChat: {
-							const auto &accepted = result.c_encryptedChat();
-
-							LOG(("1337 SecretChat: acceptEncryption done -> encryptedChat "
-								"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 key_fingerprint=%6 g_a_or_b_size=%7")
-								.arg(accepted.vid().v)
-								.arg(accepted.vaccess_hash().v)
-								.arg(accepted.vadmin_id().v)
-								.arg(accepted.vparticipant_id().v)
-								.arg(accepted.vdate().v)
-								.arg(accepted.vkey_fingerprint().v)
-								.arg(accepted.vg_a_or_b().v.size()));
-
-							Data::SecretChats::SecretChatState state;
-							state.chat_id = accepted.vid().v;
-							state.access_hash = static_cast<uint64>(accepted.vaccess_hash().v);
-							state.admin_id = static_cast<uint64>(accepted.vadmin_id().v);
-							state.participant_id = static_cast<uint64>(accepted.vparticipant_id().v);
-							state.is_creator = false; // The remote side requested this chat; we are the acceptor, not the originator.
-							state.key_fingerprint = keyFingerprint;
-							state.auth_key = paddedAuthKey;
-
-							if (!Data::SecretChats::Manager(&session()).SaveState(state)) {
-								LOG(("1337 SecretChat: state save failed after acceptEncryption"));
-							}
-						} break;
-
-						case mtpc_encryptedChatDiscarded: {
-							const auto &discarded = result.c_encryptedChatDiscarded();
-							LOG(("1337 SecretChat: acceptEncryption done -> encryptedChatDiscarded id=%1")
-								.arg(discarded.vid().v));
-						} break;
-
-						case mtpc_encryptedChatWaiting: {
-							const auto &waiting = result.c_encryptedChatWaiting();
-							LOG(("1337 SecretChat: acceptEncryption done -> encryptedChatWaiting id=%1")
-								.arg(waiting.vid().v));
-						} break;
-
-						default:
-							LOG(("1337 SecretChat: acceptEncryption done -> unexpected result.type=%1")
-								.arg(int(result.type())));
-						break;
-						}
-					}).fail([=] {
-						LOG(("1337 SecretChat: acceptEncryption failed"));
-					}).send();
-
-				}, [&](const MTPDmessages_dhConfigNotModified &data) {
-					LOG(("1337 SecretChat: getDhConfig -> dhConfigNotModified "
-						"random_size=%1")
-						.arg(data.vrandom().v.size()));
-				});
-			}).fail([=] {
-				LOG(("1337 SecretChat: getDhConfig failed"));
-			}).send();
-
+			secretManager.HandleEncryptedChatRequested(
+				c.vid().v,
+				static_cast<uint64>(c.vaccess_hash().v),
+				static_cast<uint64>(c.vadmin_id().v),
+				static_cast<uint64>(c.vparticipant_id().v),
+				c.vg_a().v,
+				c.vdate().v);
 		} break;
 
-		case mtpc_encryptedChatDiscarded: {
-			const auto &c = chat.c_encryptedChatDiscarded();
-			LOG(("1337 SecretChat: updateEncryption -> encryptedChatDiscarded id=%1")
-				.arg(c.vid().v));
-		} break;
-
-		case mtpc_encryptedChatWaiting: {
-			const auto &c = chat.c_encryptedChatWaiting();
-			LOG(("1337 SecretChat: updateEncryption -> encryptedChatWaiting "
-				"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5")
-				.arg(c.vid().v)
-				.arg(c.vaccess_hash().v)
-				.arg(c.vadmin_id().v)
-				.arg(c.vparticipant_id().v)
-				.arg(c.vdate().v));
-		} break;
-
-		case mtpc_encryptedChat: {
-			const auto &c = chat.c_encryptedChat();
-			LOG(("1337 SecretChat: updateEncryption -> encryptedChat "
-				"id=%1 access_hash=%2 admin_id=%3 participant_id=%4 date=%5 key_fingerprint=%6 g_a_or_b_size=%7")
-				.arg(c.vid().v)
-				.arg(c.vaccess_hash().v)
-				.arg(c.vadmin_id().v)
-				.arg(c.vparticipant_id().v)
-				.arg(c.vdate().v)
-				.arg(c.vkey_fingerprint().v)
-				.arg(c.vg_a_or_b().v.size()));
-		} break;
-
+		case mtpc_encryptedChatDiscarded:
+		case mtpc_encryptedChatWaiting:
+		case mtpc_encryptedChat:
 		case mtpc_encryptedChatEmpty: {
-			const auto &c = chat.c_encryptedChatEmpty();
-			LOG(("1337 SecretChat: updateEncryption -> encryptedChatEmpty id=%1")
-				.arg(c.vid().v));
+			secretManager.LogEncryptionChat(chat, "updateEncryption");
 		} break;
 
 		default:
 			LOG(("1337 SecretChat: updateEncryption -> unknown chat.type=%1")
 				.arg(int(chat.type())));
-		break;
+			break;
 		}
 	} break;
 
