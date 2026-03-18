@@ -9,6 +9,9 @@
 #include <QJsonObject>
 #include <QSaveFile>
 
+#include <QFileInfo>
+#include <QFileInfoList>
+
 namespace Data::SecretChats {
 namespace {
 
@@ -33,6 +36,17 @@ bool AuthKeyFromHex(const QString &hex, MTP::AuthKey::Data &out) {
 	std::memcpy(out.data(), raw.constData(), size_t(raw.size()));
 	return true;
 }
+
+SecretChatDescriptor ToDescriptor(const SecretChatState &state) {
+	return SecretChatDescriptor{
+		.chatId = state.chat_id,
+		.accessHash = state.access_hash,
+		.adminId = state.admin_id,
+		.participantId = state.participant_id,
+		.isCreator = state.is_creator,
+	};
+}
+
 
 } // namespace
 
@@ -154,6 +168,48 @@ std::optional<SecretChatState> LoadSecretChatState(int64_t chatId) {
 		.arg(FormatUint64(state.key_fingerprint))
 		.arg(state.is_creator ? 1 : 0));
 	return state;
+}
+
+
+QVector<SecretChatDescriptor> LoadAllSecretChats() {
+	QVector<SecretChatDescriptor> result;
+
+	QDir dir(kSecretChatsDir);
+	if (!dir.exists()) {
+		LOG(("1337 SecretChat: state dir does not exist %1").arg(kSecretChatsDir));
+		return result;
+	}
+
+	const auto files = dir.entryInfoList(
+		QStringList() << "*.json",
+		QDir::Files,
+		QDir::Name);
+
+	result.reserve(files.size());
+
+	for (const auto &fileInfo : files) {
+		bool ok = false;
+		const auto chatId = fileInfo.baseName().toLongLong(&ok);
+		if (!ok) {
+			LOG(("1337 SecretChat: skipping invalid state filename %1")
+				.arg(fileInfo.fileName()));
+			continue;
+		}
+
+		const auto state = LoadSecretChatState(chatId);
+		if (!state.has_value()) {
+			LOG(("1337 SecretChat: failed to load state while enumerating chat_id=%1")
+				.arg(chatId));
+			continue;
+		}
+
+		result.push_back(ToDescriptor(*state));
+	}
+
+	LOG(("1337 SecretChat: enumerated known secret chats count=%1")
+		.arg(result.size()));
+
+	return result;
 }
 
 } // namespace Data::SecretChats

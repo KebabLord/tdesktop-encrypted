@@ -16,6 +16,11 @@ namespace Data::SecretChats {
 
 SecretChatManager::SecretChatManager(not_null<Main::Session*> session)
 : _session(session) {
+	RefreshKnownChats();
+}
+
+void SecretChatManager::RefreshKnownChats() {
+	_knownChats = LoadAllSecretChats();
 }
 
 void SecretChatManager::HandleEncryptedMessage(
@@ -277,7 +282,15 @@ void SecretChatManager::LogEncryptionChat(const MTPEncryptedChat &chat, const ch
 }
 
 bool SecretChatManager::SaveState(const SecretChatState &state) const {
-	return SaveSecretChatState(state);
+	const auto saved = SaveSecretChatState(state);
+	if (saved) {
+		const_cast<SecretChatManager*>(this)->RefreshKnownChats();
+	}
+	return saved;
+}
+
+const QVector<SecretChatDescriptor> &SecretChatManager::KnownChats() const {
+	return _knownChats;
 }
 
 std::optional<SecretChatState> SecretChatManager::LoadState(int64_t chatId) const {
