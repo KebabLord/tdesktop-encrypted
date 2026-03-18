@@ -711,6 +711,8 @@ public:
 
 	void showCloudPassword(const QString &highlightId = QString());
 
+	void showSecretChat(int64 chatId, const SectionShow &params = SectionShow::Way::ClearStack);
+
 	void setHighlightControlId(const QString &id);
 	[[nodiscard]] QString highlightControlId() const;
 	[[nodiscard]] bool takeHighlightControlId(const QString &id);

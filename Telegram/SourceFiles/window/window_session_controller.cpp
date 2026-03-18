@@ -27,6 +27,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/info_memento.h"
 #include "info/info_controller.h"
 #include "inline_bots/bot_attach_web_view.h"
+#include "history/view/secret_chat_section.h"
 #include "history/history.h"
 #include "history/history_item.h"
 #include "history/view/reactions/history_view_reactions.h"
@@ -1390,6 +1391,12 @@ void SessionNavigation::showPeerInfo(
 	} else {
 		showPeerInfo(thread->peer()->id, params);
 	}
+}
+
+void SessionController::showSecretChat(
+		int64 chatId,
+		const SectionShow &params) {
+	showSection(std::make_shared<HistoryView::SecretChatMemento>(chatId), params);
 }
 
 void SessionNavigation::showPeerHistory(

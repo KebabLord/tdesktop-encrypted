@@ -318,6 +318,11 @@ void SecretChatManager::RebuildChatListEntries() {
 	}
 }
 
+Dialogs::SecretChatEntry *SecretChatManager::EntryForChat(int64_t chatId) const {
+	const auto i = _entries.find(chatId);
+	return (i == _entries.end()) ? nullptr : i->second.get();
+}
+
 SecretChatManager &Manager(not_null<Main::Session*> session) {
 	static auto manager = std::make_unique<SecretChatManager>(session);
 	return *manager;

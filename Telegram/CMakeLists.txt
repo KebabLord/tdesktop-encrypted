@@ -724,6 +724,7 @@ PRIVATE
     data/data_wall_paper.h
     data/data_web_page.cpp
     data/data_web_page.h
+    data/secret/secret_chat_types.h
     data/secret/secret_chat_state.cpp
     data/secret/secret_chat_storage.cpp
     data/secret/secret_chat_tl.cpp
@@ -911,6 +912,8 @@ PRIVATE
     history/view/reactions/history_view_reactions_strip.h
     history/view/reactions/history_view_reactions_tabs.cpp
     history/view/reactions/history_view_reactions_tabs.h
+    history/view/secret_chat_section.cpp
+    history/view/secret_chat_section.h
     history/view/history_view_top_peers_selector.cpp
     history/view/history_view_top_peers_selector.h
     history/view/history_view_about_view.cpp

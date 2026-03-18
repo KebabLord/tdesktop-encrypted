@@ -41,6 +41,7 @@ public:
 	std::optional<SecretChatState> LoadState(int64_t chatId) const;
 	const QVector<SecretParsedMessage> &Messages(int64_t chatId) const;
 	const QVector<SecretChatDescriptor> &KnownChats() const;
+	Dialogs::SecretChatEntry *EntryForChat(int64_t chatId) const;
 
 private:
 	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);

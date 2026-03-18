@@ -14,6 +14,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "dialogs/ui/dialogs_stories_content.h"
 #include "dialogs/ui/dialogs_stories_list.h"
 #include "dialogs/ui/dialogs_suggestions.h"
+#include "dialogs/secret_chat_entry.h"
 #include "dialogs/dialogs_inner_widget.h"
 #include "dialogs/dialogs_search_from_controllers.h"
 #include "dialogs/dialogs_top_bar_suggestion.h"
@@ -871,6 +872,18 @@ void Widget::chosenRow(const ChosenRow &row) {
 	} else if (!_searchState.query.isEmpty()) {
 		if (const auto history = row.key.history()) {
 			session().recentPeers().bump(history->peer);
+		}
+	}
+
+	// Secret chat is handled separately because it doesn't have a history and is not opened in a thread.
+	if (row.key) {
+		if (const auto secret = dynamic_cast<Dialogs::SecretChatEntry*>(&*row.key.entry())) {
+			controller()->showSecretChat(
+				secret->chatId(),
+				Window::SectionShow(Window::SectionShow::Way::ClearStack));
+			hideChildList();
+			updateForceDisplayWide();
+			return;
 		}
 	}
 
