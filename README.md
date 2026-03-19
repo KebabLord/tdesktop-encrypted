@@ -17,7 +17,7 @@ The source code is published under GPLv3 with OpenSSL exception, the license is 
  - [x] Accept incoming secret chats, key exchange 
  - [x] Decrypt incoming messages, encrypt outgoing messages
  - [x] A simple UI that can handle sending & receiving text messages
- - [ ] Proper & Secure storage of chats and messages
+ - [x] Proper & Secure storage of chats and messages
  - [ ] Support stickers, documents, pictures, text formatting
  - [ ] Support read receipts, typing & online events, message deletion
  - [ ] Handle key rotation properly
