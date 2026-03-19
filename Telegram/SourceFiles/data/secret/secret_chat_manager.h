@@ -6,9 +6,10 @@
 
 #include <QMap>
 #include <QVector>
-#include <optional>
 #include <map>
 #include <memory>
+#include <optional>
+#include <vector>
 
 namespace Dialogs {
 class Entry;
@@ -18,6 +19,8 @@ class SecretChatEntry;
 namespace Main {
 class Session;
 } // namespace Main
+
+class History;
 
 namespace Data::SecretChats {
 
@@ -45,12 +48,18 @@ public:
 	const QVector<SecretParsedMessage> &Messages(int64_t chatId) const;
 	const QVector<SecretChatDescriptor> &KnownChats() const;
 	[[nodiscard]] Dialogs::Entry *EntryForChat(int64_t chatId) const;
+	[[nodiscard]] not_null<History*> ViewHistoryForChat(int64_t chatId);
+	[[nodiscard]] const std::vector<FullMsgId> &ViewMessageIds(int64_t chatId);
 	[[nodiscard]] rpl::producer<int64_t> messageUpdates() const;
 
 
 private:
+	struct RenderState;
+
 	void EnsureEntriesFromKnownChats();
 	void EnsureEntryForChat(const SecretChatDescriptor &descriptor);
+	[[nodiscard]] RenderState &EnsureRenderState(int64_t chatId);
+	void AppendRenderedMessage(RenderState &state, const SecretParsedMessage &message);
 	void RefreshChatListEntry(not_null<Dialogs::SecretChatEntry*> entry);
 	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);
 	void RefreshKnownChats();
@@ -58,6 +67,7 @@ private:
 	QMap<int64_t, QVector<SecretParsedMessage>> _messages;
 	QVector<SecretChatDescriptor> _knownChats;
 	std::map<int64_t, std::unique_ptr<Dialogs::SecretChatEntry>> _entries;
+	std::map<int64_t, std::unique_ptr<RenderState>> _rendered;
 	rpl::event_stream<int64_t> _messageUpdates;
 };
 

@@ -3,9 +3,12 @@
 #include "data/secret/secret_chat_parser.h"
 #include "data/secret/secret_chat_storage.h"
 #include "data/secret/secret_chat_types.h"
+#include "data/data_peer.h"
 #include "data/data_session.h"
 #include "dialogs/dialogs_key.h"
 #include "dialogs/secret_chat_entry.h"
+#include "history/history.h"
+#include "history/history_item.h"
 
 #include "base/unixtime.h"
 #include "logs.h"
@@ -19,6 +22,65 @@
 #include <map>
 
 namespace Data::SecretChats {
+
+struct SecretChatManager::RenderState {
+	PeerId peerId = 0;
+	not_null<History*> history;
+	std::vector<FullMsgId> ids;
+};
+
+namespace {
+
+[[nodiscard]] QString RenderMessageText(const SecretParsedMessage &message) {
+	QString line;
+	std::visit([&](const auto &value) {
+		using T = std::decay_t<decltype(value)>;
+		if constexpr (std::is_same_v<T, SecretParsedTextMessage>) {
+			line = value.text;
+		} else if constexpr (std::is_same_v<T, SecretParsedServiceMessage>) {
+			line = QString("[service 0x%1]").arg(
+				value.actionConstructor,
+				8,
+				16,
+				QLatin1Char('0'));
+		} else if constexpr (std::is_same_v<T, SecretParsedUnsupportedMessage>) {
+			line = QString("[unsupported %1]").arg(value.description);
+		}
+	}, message);
+	return line;
+}
+
+[[nodiscard]] PeerId EnsureFakeSecretPeer(
+		not_null<Data::Session*> owner,
+		int64_t chatId) {
+	const auto name = QString("Secret Chat %1").arg(chatId);
+	const auto peerId = Data::FakePeerIdForJustName(name);
+	owner->processUser(MTP_user(
+		MTP_flags(MTPDuser::Flag::f_first_name | MTPDuser::Flag::f_min),
+		peerToBareMTPInt(peerId),
+		MTP_long(0),
+		MTP_string(name),
+		MTPstring(),
+		MTPstring(),
+		MTPstring(),
+		MTPUserProfilePhoto(),
+		MTPUserStatus(),
+		MTP_int(0),
+		MTPVector<MTPRestrictionReason>(),
+		MTPstring(),
+		MTPstring(),
+		MTPEmojiStatus(),
+		MTPVector<MTPUsername>(),
+		MTPRecentStory(),
+		MTPPeerColor(),
+		MTPPeerColor(),
+		MTPint(),
+		MTPlong(),
+		MTPlong()));
+	return peerId;
+}
+
+} // namespace
 
 SecretChatManager::SecretChatManager(not_null<Main::Session*> session)
 : _session(session) {
@@ -46,6 +108,41 @@ void SecretChatManager::EnsureEntryForChat(
 		descriptor.chatId);
 	RefreshChatListEntry(entry.get());
 	_entries.emplace(descriptor.chatId, std::move(entry));
+}
+
+auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
+	if (const auto i = _rendered.find(chatId); i != end(_rendered)) {
+		return *i->second;
+	}
+	const auto peerId = EnsureFakeSecretPeer(&_session->data(), chatId);
+	auto state = std::make_unique<RenderState>(RenderState{
+		.peerId = peerId,
+		.history = _session->data().history(peerId),
+	});
+	if (const auto i = _messages.find(chatId); i != _messages.end()) {
+		for (const auto &message : i.value()) {
+			AppendRenderedMessage(*state, message);
+		}
+	}
+	auto raw = state.get();
+	_rendered.emplace(chatId, std::move(state));
+	return *raw;
+}
+
+void SecretChatManager::AppendRenderedMessage(
+		RenderState &state,
+		const SecretParsedMessage &message) {
+	auto fields = HistoryItemCommonFields{
+		.id = state.history->nextNonHistoryEntryId(),
+		.flags = (MessageFlag::FakeHistoryItem | MessageFlag::HasFromId),
+		.from = state.peerId,
+		.date = base::unixtime::now(),
+	};
+	const auto item = state.history->addNewLocalMessage(
+		std::move(fields),
+		TextWithEntities{ .text = RenderMessageText(message) },
+		MTP_messageMediaEmpty());
+	state.ids.push_back(item->fullId());
 }
 
 void SecretChatManager::RefreshChatListEntry(
@@ -364,6 +461,9 @@ void SecretChatManager::StoreParsedMessage(
 	LOG(("1335 SecretChat: stored parsed message chat_id=%1 total=%2")
 		.arg(chatId)
 		.arg(list.size()));
+	if (const auto i = _rendered.find(chatId); i != _rendered.end()) {
+		AppendRenderedMessage(*i->second, list.back());
+	}
 	if (const auto i = _entries.find(chatId); i != _entries.end()) {
 		i->second->setChatListTimeId(base::unixtime::now());
 		i->second->updateChatListSortPosition();
@@ -381,6 +481,14 @@ const QVector<SecretParsedMessage> &SecretChatManager::Messages(int64_t chatId) 
 Dialogs::Entry *SecretChatManager::EntryForChat(int64_t chatId) const {
 	const auto i = _entries.find(chatId);
 	return (i == _entries.end()) ? nullptr : i->second.get();
+}
+
+not_null<History*> SecretChatManager::ViewHistoryForChat(int64_t chatId) {
+	return EnsureRenderState(chatId).history;
+}
+
+const std::vector<FullMsgId> &SecretChatManager::ViewMessageIds(int64_t chatId) {
+	return EnsureRenderState(chatId).ids;
 }
 
 rpl::producer<int64_t> SecretChatManager::messageUpdates() const {

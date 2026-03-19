@@ -1,14 +1,21 @@
 #include "history/view/secret_chat_section.h"
 
 #include "data/secret/secret_chat_manager.h"
-#include "data/secret/secret_chat_types.h"
 #include "dialogs/dialogs_key.h"
+#include "history/history.h"
+#include "history/history_item.h"
+#include "ui/chat/chat_theme.h"
 #include "ui/painter.h"
+#include "ui/widgets/elastic_scroll.h"
+#include "ui/widgets/labels.h"
+#include "window/themes/window_theme.h"
+
+#include "styles/style_chat.h"
+#include "styles/style_settings.h"
 
 #include "rpl/filter.h"
-#include "rpl/consumer.h"
 
-#include <variant>
+#include <algorithm>
 
 namespace HistoryView {
 
@@ -34,22 +41,49 @@ SecretChatWidget::SecretChatWidget(
 		not_null<Window::SessionController*> controller,
 		int64_t chatId)
 : SectionWidget(parent, controller)
-, _chatId(chatId) {
+, WindowListDelegate(controller)
+, _chatId(chatId)
+, _history(Data::SecretChats::Manager(&session()).ViewHistoryForChat(chatId))
+, _theme(Window::Theme::DefaultChatThemeOn(lifetime()))
+, _title(std::make_unique<Ui::FlatLabel>(
+		this,
+		rpl::single(QString("Secret Chat %1").arg(chatId)),
+		st::previewName))
+, _status(std::make_unique<Ui::FlatLabel>(
+		this,
+		rpl::single(QString("Read-only secret chat")),
+		st::previewStatus))
+, _scroll(std::make_unique<Ui::ElasticScroll>(this)) {
+	_title->setAttribute(Qt::WA_TransparentForMouseEvents);
+	_status->setAttribute(Qt::WA_TransparentForMouseEvents);
+	_inner = _scroll->setOwnedWidget(object_ptr<ListWidget>(
+		this,
+		&session(),
+		static_cast<ListDelegate*>(this)));
+	_scroll->setOverscrollBg(QColor(0, 0, 0, 0));
+	using Type = Ui::ElasticScroll::OverscrollType;
+	_scroll->setOverscrollTypes(Type::Real, Type::Real);
+	_scroll->scrolls() | rpl::on_next([=] {
+		updateInnerVisibleArea();
+	}, lifetime());
+	_inner->scrollKeyEvents() | rpl::on_next([=](not_null<QKeyEvent*> e) {
+		_scroll->keyPressEvent(e);
+	}, lifetime());
+	_inner->refreshViewer();
+	crl::on_main(this, [=] {
+		_inner->setFocus();
+	});
 	Data::SecretChats::Manager(&session()).messageUpdates(
 	) | rpl::filter([=](int64_t updatedChatId) {
 		return updatedChatId == _chatId;
 	}) | rpl::on_next([=](int64_t) {
-		update();
+		_inner->refreshViewer();
+		updateInnerVisibleArea();
 	}, lifetime());
 }
 
-// We shouldn't return a normal chat because it's not yet implemented to be a full chat, and it can cause issues in some places that expect a full chat. For example, when we open a secret chat from the profile of the other user, the history section is opened with the peer of the other user, and if we return a normal chat here, it will cause issues in the history section because it expects a full chat. So we return an empty descriptor here to avoid issues in the history section, and we can implement it later when we have a full chat implementation for secret chats.
-/*Dialogs::RowDescriptor SecretChatWidget::activeChat() const {
-	if (const auto entry = Data::SecretChats::Manager(&session()).EntryForChat(_chatId)) {
-		return { Dialogs::Key(entry), FullMsgId() };
-	}
-	return {};
-}*/
+SecretChatWidget::~SecretChatWidget() = default;
+
 Dialogs::RowDescriptor SecretChatWidget::activeChat() const {
 	if (const auto entry = Data::SecretChats::Manager(&session()).EntryForChat(_chatId)) {
 		return { Dialogs::Key(entry), FullMsgId() };
@@ -74,60 +108,212 @@ std::shared_ptr<Window::SectionMemento> SecretChatWidget::createMemento() {
 	return std::make_shared<SecretChatMemento>(_chatId);
 }
 
+bool SecretChatWidget::hasTopBarShadow() const {
+	return true;
+}
+
 bool SecretChatWidget::floatPlayerHandleWheelEvent(QEvent *e) {
 	return false;
 }
 
 QRect SecretChatWidget::floatPlayerAvailableRect() {
-	return rect();
+	return rect().marginsRemoved({ 0, st::previewTop.height, 0, 0 });
+}
+
+void SecretChatWidget::checkActivation() {
+	_inner->checkActivation();
+}
+
+void SecretChatWidget::resizeEvent(QResizeEvent *e) {
+	SectionWidget::resizeEvent(e);
+	_title->resizeToNaturalWidth(width() - st::previewTop.namePosition.x());
+	_title->move(st::previewTop.namePosition);
+	_status->resizeToNaturalWidth(width() - st::previewTop.statusPosition.x());
+	_status->move(st::previewTop.statusPosition);
+	_scroll->setGeometry(rect().marginsRemoved({ 0, st::previewTop.height, 0, 0 }));
+	_inner->resizeToWidth(_scroll->width(), _scroll->height());
+	updateInnerVisibleArea();
 }
 
 void SecretChatWidget::paintEvent(QPaintEvent *e) {
-	SectionWidget::paintEvent(e);
-
 	Painter p(this);
-	p.setPen(palette().windowText().color());
+	Window::SectionWidget::PaintBackground(
+		p,
+		_theme.get(),
+		QSize(width(), height() * 2),
+		e->rect());
+	p.fillRect(0, 0, width(), st::previewTop.height, st::topBarBg);
+	p.fillRect(0, st::previewTop.height, width(), st::lineWidth, st::shadowFg);
+}
 
-	int y = 20;
-	p.drawText(20, y, title());
-	y += 30;
-
-	const auto &messages = Data::SecretChats::Manager(&session()).Messages(_chatId);
-	if (messages.isEmpty()) {
-		p.drawText(20, y, QString("No in-memory messages."));
-		return;
-	}
-
-	for (const auto &message : messages) {
-		const auto line = formatMessage(message);
-
-		p.drawText(QRect(20, y, width() - 40, 40), Qt::TextWordWrap, line);
-		y += 44;
+void SecretChatWidget::doSetInnerFocus() {
+	if (_inner) {
+		_inner->setFocus();
 	}
 }
 
-QString SecretChatWidget::title() const {
-	return QString("Secret Chat %1").arg(_chatId);
+void SecretChatWidget::updateInnerVisibleArea() {
+	const auto scrollTop = _scroll->scrollTop();
+	_inner->setVisibleTopBottom(scrollTop, scrollTop + _scroll->height());
 }
 
-QString SecretChatWidget::formatMessage(
-		const Data::SecretChats::SecretParsedMessage &message) const {
-	QString line;
-	std::visit([&](const auto &value) {
-		using T = std::decay_t<decltype(value)>;
-		if constexpr (std::is_same_v<T, Data::SecretChats::SecretParsedTextMessage>) {
-			line = value.text;
-		} else if constexpr (std::is_same_v<T, Data::SecretChats::SecretParsedServiceMessage>) {
-			line = QString("[service 0x%1]").arg(
-				value.actionConstructor,
-				8,
-				16,
-				QLatin1Char('0'));
-		} else if constexpr (std::is_same_v<T, Data::SecretChats::SecretParsedUnsupportedMessage>) {
-			line = QString("[unsupported %1]").arg(value.description);
+Context SecretChatWidget::listContext() {
+	return Context::ChatPreview;
+}
+
+bool SecretChatWidget::listScrollTo(int top, bool syntetic) {
+	top = std::clamp(top, 0, _scroll->scrollTopMax());
+	if (_scroll->scrollTop() == top) {
+		updateInnerVisibleArea();
+		return false;
+	}
+	_scroll->scrollToY(top);
+	return true;
+}
+
+void SecretChatWidget::listCancelRequest() {
+}
+
+void SecretChatWidget::listDeleteRequest() {
+}
+
+void SecretChatWidget::listTryProcessKeyInput(not_null<QKeyEvent*> e) {
+}
+
+rpl::producer<Data::MessagesSlice> SecretChatWidget::listSource(
+		Data::MessagePosition aroundId,
+		int limitBefore,
+		int limitAfter) {
+	auto result = Data::MessagesSlice();
+	result.ids = Data::SecretChats::Manager(&session()).ViewMessageIds(_chatId);
+	result.nearestToAround = result.ids.empty() ? FullMsgId() : result.ids.back();
+	return rpl::single(std::move(result));
+}
+
+bool SecretChatWidget::listAllowsMultiSelect() {
+	return false;
+}
+
+bool SecretChatWidget::listIsItemGoodForSelection(not_null<HistoryItem*> item) {
+	return false;
+}
+
+bool SecretChatWidget::listIsLessInOrder(
+		not_null<HistoryItem*> first,
+		not_null<HistoryItem*> second) {
+	if (first->isRegular() && second->isRegular()) {
+		const auto firstPeer = first->history()->peer;
+		const auto secondPeer = second->history()->peer;
+		if (firstPeer == secondPeer) {
+			return first->id < second->id;
 		}
-	}, message);
-	return line;
+	}
+	return first->id < second->id;
+}
+
+void SecretChatWidget::listSelectionChanged(SelectedItems &&items) {
+}
+
+void SecretChatWidget::listMarkReadTill(not_null<HistoryItem*> item) {
+}
+
+void SecretChatWidget::listMarkContentsRead(
+		const base::flat_set<not_null<HistoryItem*>> &items) {
+}
+
+MessagesBarData SecretChatWidget::listMessagesBar(
+		const std::vector<not_null<Element*>> &elements) {
+	return {};
+}
+
+void SecretChatWidget::listContentRefreshed() {
+}
+
+void SecretChatWidget::listUpdateDateLink(
+		ClickHandlerPtr &link,
+		not_null<Element*> view) {
+}
+
+bool SecretChatWidget::listElementHideReply(not_null<const Element*> view) {
+	return false;
+}
+
+bool SecretChatWidget::listElementShownUnread(not_null<const Element*> view) {
+	return false;
+}
+
+bool SecretChatWidget::listIsGoodForAroundPosition(not_null<const Element*> view) {
+	return view->data()->isRegular();
+}
+
+void SecretChatWidget::listSendBotCommand(
+		const QString &command,
+		const FullMsgId &context) {
+}
+
+void SecretChatWidget::listSearch(
+		const QString &query,
+		const FullMsgId &context) {
+}
+
+void SecretChatWidget::listHandleViaClick(not_null<UserData*> bot) {
+}
+
+not_null<Ui::ChatTheme*> SecretChatWidget::listChatTheme() {
+	return _theme.get();
+}
+
+CopyRestrictionType SecretChatWidget::listCopyRestrictionType(HistoryItem *item) {
+	return CopyRestrictionType::None;
+}
+
+CopyRestrictionType SecretChatWidget::listCopyMediaRestrictionType(
+		not_null<HistoryItem*> item) {
+	return CopyRestrictionType::None;
+}
+
+CopyRestrictionType SecretChatWidget::listSelectRestrictionType() {
+	return CopyRestrictionType::None;
+}
+
+auto SecretChatWidget::listAllowedReactionsValue()
+		-> rpl::producer<Data::AllowedReactions> {
+	return rpl::single(Data::AllowedReactions());
+}
+
+void SecretChatWidget::listShowPremiumToast(not_null<DocumentData*> document) {
+}
+
+void SecretChatWidget::listOpenPhoto(
+		not_null<PhotoData*> photo,
+		FullMsgId context) {
+}
+
+void SecretChatWidget::listOpenDocument(
+		not_null<DocumentData*> document,
+		FullMsgId context,
+		bool showInMediaView) {
+}
+
+void SecretChatWidget::listPaintEmpty(
+		Painter &p,
+		const Ui::ChatPaintContext &context) {
+}
+
+QString SecretChatWidget::listElementAuthorRank(not_null<const Element*> view) {
+	return {};
+}
+
+bool SecretChatWidget::listElementHideTopicButton(not_null<const Element*> view) {
+	return true;
+}
+
+History *SecretChatWidget::listTranslateHistory() {
+	return nullptr;
+}
+
+void SecretChatWidget::listAddTranslatedItems(
+		not_null<TranslateTracker*> tracker) {
 }
 
 } // namespace HistoryView
