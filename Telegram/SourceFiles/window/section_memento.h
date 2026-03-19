@@ -7,9 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-namespace Ui {
-class LayerWidget;
-} // namespace Ui
+#include "base/object_ptr.h"
+#include "ui/layers/layer_widget.h"
 
 namespace Data {
 class ForumTopic;

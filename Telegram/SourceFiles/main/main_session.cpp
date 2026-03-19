@@ -40,6 +40,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/components/scheduled_messages.h"
 #include "data/components/sponsored_messages.h"
 #include "data/components/top_peers.h"
+#include "data/secret/secret_chat_manager.h"
 #include "settings/settings_faq_suggestions.h"
 #include "data/data_session.h"
 #include "data/data_changes.h"
@@ -164,6 +165,8 @@ Session::Session(
 , _fastButtonsBots(std::make_unique<Support::FastButtonsBots>(this))
 , _saveSettingsTimer([=] { saveSettings(); }) {
 	Expects(_settings != nullptr);
+
+	[[maybe_unused]] auto &secretChats = Data::SecretChats::Manager(this);
 
 	_api->requestTermsUpdate();
 	_api->requestFullPeer(_user);

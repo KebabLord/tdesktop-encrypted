@@ -3,7 +3,11 @@
 #include "data/secret/secret_chat_parser.h"
 #include "data/secret/secret_chat_storage.h"
 #include "data/secret/secret_chat_types.h"
+#include "data/data_session.h"
+#include "dialogs/dialogs_key.h"
+#include "dialogs/secret_chat_entry.h"
 
+#include "base/unixtime.h"
 #include "logs.h"
 #include "main/main_session.h"
 #include "mtproto/mtproto_config.h"
@@ -12,15 +16,42 @@
 
 #include "base/openssl_help.h"
 
+#include <map>
+
 namespace Data::SecretChats {
 
 SecretChatManager::SecretChatManager(not_null<Main::Session*> session)
 : _session(session) {
 	RefreshKnownChats();
+	EnsureEntriesFromKnownChats();
 }
 
 void SecretChatManager::RefreshKnownChats() {
 	_knownChats = LoadAllSecretChats();
+}
+
+void SecretChatManager::EnsureEntriesFromKnownChats() {
+	for (const auto &descriptor : _knownChats) {
+		EnsureEntryForChat(descriptor);
+	}
+}
+
+void SecretChatManager::EnsureEntryForChat(
+		const SecretChatDescriptor &descriptor) {
+	if (_entries.find(descriptor.chatId) != end(_entries)) {
+		return;
+	}
+	auto entry = std::make_unique<Dialogs::SecretChatEntry>(
+		&_session->data(),
+		descriptor.chatId);
+	RefreshChatListEntry(entry.get());
+	_entries.emplace(descriptor.chatId, std::move(entry));
+}
+
+void SecretChatManager::RefreshChatListEntry(
+		not_null<Dialogs::SecretChatEntry*> entry) {
+	_session->data().refreshChatListEntry(
+		Dialogs::Key(static_cast<Dialogs::Entry*>(entry.get())));
 }
 
 void SecretChatManager::HandleEncryptedMessage(
@@ -284,7 +315,14 @@ void SecretChatManager::LogEncryptionChat(const MTPEncryptedChat &chat, const ch
 bool SecretChatManager::SaveState(const SecretChatState &state) const {
 	const auto saved = SaveSecretChatState(state);
 	if (saved) {
-		const_cast<SecretChatManager*>(this)->RefreshKnownChats();
+		auto that = const_cast<SecretChatManager*>(this);
+		that->RefreshKnownChats();
+		for (const auto &descriptor : that->_knownChats) {
+			if (descriptor.chatId == state.chat_id) {
+				that->EnsureEntryForChat(descriptor);
+				break;
+			}
+		}
 	}
 	return saved;
 }
@@ -298,24 +336,55 @@ std::optional<SecretChatState> SecretChatManager::LoadState(int64_t chatId) cons
 }
 
 SecretChatManager &Manager(not_null<Main::Session*> session) {
-	static auto manager = std::make_unique<SecretChatManager>(session);
-	return *manager;
+	static auto managers = std::map<Main::Session*, std::unique_ptr<SecretChatManager>>();
+	const auto i = managers.find(session.get());
+	if (i != managers.end()) {
+		return *i->second;
+	}
+	auto manager = std::make_unique<SecretChatManager>(session);
+	auto result = manager.get();
+	managers.emplace(session.get(), std::move(manager));
+	return *result;
 }
 
 void SecretChatManager::StoreParsedMessage(
 		int64_t chatId,
 		SecretParsedMessage message) {
+	if (const auto state = LoadState(chatId); state.has_value()) {
+		EnsureEntryForChat(SecretChatDescriptor{
+			.chatId = state->chat_id,
+			.accessHash = state->access_hash,
+			.adminId = state->admin_id,
+			.participantId = state->participant_id,
+			.isCreator = state->is_creator,
+		});
+	}
 	auto &list = _messages[chatId];
 	list.push_back(std::move(message));
 	LOG(("1335 SecretChat: stored parsed message chat_id=%1 total=%2")
 		.arg(chatId)
 		.arg(list.size()));
+	if (const auto i = _entries.find(chatId); i != _entries.end()) {
+		i->second->setChatListTimeId(base::unixtime::now());
+		i->second->updateChatListSortPosition();
+		RefreshChatListEntry(i->second.get());
+	}
+	_messageUpdates.fire_copy(chatId);
 }
 
 const QVector<SecretParsedMessage> &SecretChatManager::Messages(int64_t chatId) const {
 	static const QVector<SecretParsedMessage> kEmpty;
 	const auto i = _messages.find(chatId);
 	return (i == _messages.end()) ? kEmpty : i.value();
+}
+
+Dialogs::Entry *SecretChatManager::EntryForChat(int64_t chatId) const {
+	const auto i = _entries.find(chatId);
+	return (i == _entries.end()) ? nullptr : i->second.get();
+}
+
+rpl::producer<int64_t> SecretChatManager::messageUpdates() const {
+	return _messageUpdates.events();
 }
 
 } // namespace Data::SecretChats

@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "dialogs/dialogs_key.h"
 #include "dialogs/dialogs_indexed_list.h"
+#include "dialogs/secret_chat_entry.h"
 #include "data/data_changes.h"
 #include "data/data_session.h"
 #include "data/data_folder.h"
@@ -83,6 +84,10 @@ Entry::Entry(not_null<Data::Session*> owner, Type type)
 : _owner(owner)
 , _flags((type == Type::History)
 	? (Flag::IsThread | Flag::IsHistory)
+	: (type == Type::Folder)
+	? Flag::IsFolder
+	: (type == Type::SecretChat)
+	? Flag::IsSecretChat
 	: (type == Type::ForumTopic)
 	? (Flag::IsThread | Flag::IsForumTopic)
 	: (type == Type::SavedSublist)
@@ -113,9 +118,15 @@ Data::Forum *Entry::asForum() {
 }
 
 Data::Folder *Entry::asFolder() {
-	return (_flags & Flag::IsThread)
-		? nullptr
-		: static_cast<Data::Folder*>(this);
+	return (_flags & Flag::IsFolder)
+		? static_cast<Data::Folder*>(this)
+		: nullptr;
+}
+
+SecretChatEntry *Entry::asSecretChat() {
+	return (_flags & Flag::IsSecretChat)
+		? static_cast<SecretChatEntry*>(this)
+		: nullptr;
 }
 
 Data::Thread *Entry::asThread() {
@@ -146,6 +157,10 @@ const Data::Forum *Entry::asForum() const {
 
 const Data::Folder *Entry::asFolder() const {
 	return const_cast<Entry*>(this)->asFolder();
+}
+
+const SecretChatEntry *Entry::asSecretChat() const {
+	return const_cast<Entry*>(this)->asSecretChat();
 }
 
 const Data::Thread *Entry::asThread() const {

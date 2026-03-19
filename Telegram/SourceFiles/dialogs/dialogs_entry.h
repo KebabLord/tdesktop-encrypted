@@ -46,6 +46,7 @@ struct UnreadState;
 class Row;
 class IndexedList;
 class MainList;
+class SecretChatEntry;
 
 [[nodiscard]] BadgesState BadgesForUnread(
 	const UnreadState &state,
@@ -57,6 +58,7 @@ public:
 	enum class Type : uchar {
 		History,
 		Folder,
+		SecretChat,
 		ForumTopic,
 		SavedSublist,
 	};
@@ -69,6 +71,7 @@ public:
 	History *asHistory();
 	Data::Forum *asForum();
 	Data::Folder *asFolder();
+	SecretChatEntry *asSecretChat();
 	Data::Thread *asThread();
 	Data::ForumTopic *asTopic();
 	Data::SavedSublist *asSublist();
@@ -76,6 +79,7 @@ public:
 	const History *asHistory() const;
 	const Data::Forum *asForum() const;
 	const Data::Folder *asFolder() const;
+	const SecretChatEntry *asSecretChat() const;
 	const Data::Thread *asThread() const;
 	const Data::ForumTopic *asTopic() const;
 	const Data::SavedSublist *asSublist() const;
@@ -169,10 +173,12 @@ private:
 	enum class Flag : uchar {
 		IsThread = (1 << 0),
 		IsHistory = (1 << 1),
-		IsForumTopic = (1 << 2),
-		IsSavedSublist = (1 << 3),
-		UpdatePostponed = (1 << 4),
-		InUnreadChangeBlock = (1 << 5),
+		IsFolder = (1 << 2),
+		IsForumTopic = (1 << 3),
+		IsSavedSublist = (1 << 4),
+		IsSecretChat = (1 << 5),
+		UpdatePostponed = (1 << 6),
+		InUnreadChangeBlock = (1 << 7),
 	};
 	friend inline constexpr bool is_flag_type(Flag) { return true; }
 	using Flags = base::flags<Flag>;

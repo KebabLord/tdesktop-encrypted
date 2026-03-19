@@ -744,6 +744,8 @@ PRIVATE
     dialogs/ui/dialogs_video_userpic.h
     dialogs/dialogs_entry.cpp
     dialogs/dialogs_entry.h
+    dialogs/secret_chat_entry.cpp
+    dialogs/secret_chat_entry.h
     dialogs/dialogs_indexed_list.cpp
     dialogs/dialogs_indexed_list.h
     dialogs/dialogs_inner_widget.cpp
@@ -919,6 +921,8 @@ PRIVATE
     history/view/history_view_chat_preview.h
     history/view/history_view_chat_section.cpp
     history/view/history_view_chat_section.h
+    history/view/secret_chat_section.cpp
+    history/view/secret_chat_section.h
     history/view/history_view_contact_status.cpp
     history/view/history_view_contact_status.h
     history/view/history_view_context_menu.cpp

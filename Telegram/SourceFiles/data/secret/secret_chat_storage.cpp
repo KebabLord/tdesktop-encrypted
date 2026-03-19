@@ -2,6 +2,7 @@
 
 #include "base/algorithm.h"
 #include "logs.h"
+#include "settings.h"
 
 #include <QDir>
 #include <QFile>
@@ -15,10 +16,12 @@
 namespace Data::SecretChats {
 namespace {
 
-constexpr auto kSecretChatsDir = "/home/owo/Github/tdesktop/tmp/secret_chats";
+QString SecretChatsDir() {
+	return cWorkingDir() + QStringLiteral("tmp/secret_chats");
+}
 
 QString SecretChatStatePath(int64_t chatId) {
-	return QString("%1/%2.json").arg(kSecretChatsDir).arg(chatId);
+	return QString("%1/%2.json").arg(SecretChatsDir()).arg(chatId);
 }
 
 QString AuthKeyToHex(const MTP::AuthKey::Data &authKey) {
@@ -52,8 +55,9 @@ SecretChatDescriptor ToDescriptor(const SecretChatState &state) {
 
 bool SaveSecretChatState(const SecretChatState &state) {
 	QDir dir;
-	if (!dir.mkpath(kSecretChatsDir)) {
-		LOG(("1337 SecretChat: failed to create state dir %1").arg(kSecretChatsDir));
+	const auto dirPath = SecretChatsDir();
+	if (!dir.mkpath(dirPath)) {
+		LOG(("1337 SecretChat: failed to create state dir %1").arg(dirPath));
 		return false;
 	}
 
@@ -174,9 +178,10 @@ std::optional<SecretChatState> LoadSecretChatState(int64_t chatId) {
 QVector<SecretChatDescriptor> LoadAllSecretChats() {
 	QVector<SecretChatDescriptor> result;
 
-	QDir dir(kSecretChatsDir);
+	const auto dirPath = SecretChatsDir();
+	QDir dir(dirPath);
 	if (!dir.exists()) {
-		LOG(("1337 SecretChat: state dir does not exist %1").arg(kSecretChatsDir));
+		LOG(("1337 SecretChat: state dir does not exist %1").arg(dirPath));
 		return result;
 	}
 
