@@ -2,16 +2,9 @@
 
 #include "logs.h"
 #include "main/main_session.h"
-#include "settings.h"
 #include "storage/storage_account.h"
 
 #include <QBuffer>
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
-#include <QFileInfoList>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QMap>
 
 #include <cstring>
@@ -33,23 +26,6 @@ struct SecretStore {
 	QMap<int64_t, SecretChatState> states;
 	QMap<int64_t, QVector<SecretParsedMessage>> messages;
 };
-
-QString SecretChatsDir() {
-	return cWorkingDir() + QStringLiteral("tmp/secret_chats");
-}
-
-QString SecretChatStatePath(int64_t chatId) {
-	return QString("%1/%2.json").arg(SecretChatsDir()).arg(chatId);
-}
-
-bool AuthKeyFromHex(const QString &hex, MTP::AuthKey::Data &out) {
-	const auto raw = QByteArray::fromHex(hex.toLatin1());
-	if (raw.size() != int(MTP::AuthKey::kSize)) {
-		return false;
-	}
-	std::memcpy(out.data(), raw.constData(), size_t(raw.size()));
-	return true;
-}
 
 SecretChatDescriptor ToDescriptor(const SecretChatState &state) {
 	return SecretChatDescriptor{
@@ -324,80 +300,6 @@ std::optional<SecretStore> DeserializeStore(const QByteArray &bytes) {
 	return result;
 }
 
-SecretStore LoadLegacyJsonStore() {
-	auto result = SecretStore();
-	const auto dirPath = SecretChatsDir();
-	QDir dir(dirPath);
-	if (!dir.exists()) {
-		return result;
-	}
-	const auto files = dir.entryInfoList(
-		QStringList() << "*.json",
-		QDir::Files,
-		QDir::Name);
-	for (const auto &fileInfo : files) {
-		bool ok = false;
-		const auto chatId = fileInfo.baseName().toLongLong(&ok);
-		if (!ok) {
-			continue;
-		}
-		auto file = QFile(SecretChatStatePath(chatId));
-		if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
-			continue;
-		}
-		const auto doc = QJsonDocument::fromJson(file.readAll());
-		if (!doc.isObject()) {
-			continue;
-		}
-		const auto object = doc.object();
-		auto state = SecretChatState();
-		state.chat_id = object.value("chat_id").toString().toLongLong(&ok);
-		if (!ok) {
-			continue;
-		}
-		state.access_hash = object.value("access_hash").toString().toULongLong(&ok);
-		if (!ok) {
-			continue;
-		}
-		state.admin_id = object.value("admin_id").toString().toULongLong(&ok);
-		if (!ok) {
-			continue;
-		}
-		state.participant_id = object.value("participant_id").toString().toULongLong(&ok);
-		if (!ok) {
-			continue;
-		}
-		state.is_creator = object.value("is_creator").toString().toShort(&ok);
-		if (!ok) {
-			continue;
-		}
-		if (object.contains("layer")) {
-			state.layer = object.value("layer").toString().toInt(&ok);
-			if (!ok) {
-				continue;
-			}
-		}
-		if (object.contains("incoming_sequence")) {
-			state.incoming_sequence = object.value("incoming_sequence").toString().toInt(&ok);
-			if (!ok) {
-				continue;
-			}
-		}
-		if (object.contains("outgoing_sequence")) {
-			state.outgoing_sequence = object.value("outgoing_sequence").toString().toInt(&ok);
-			if (!ok) {
-				continue;
-			}
-		}
-		state.key_fingerprint = object.value("key_fingerprint").toString().toULongLong(&ok);
-		if (!ok || !AuthKeyFromHex(object.value("auth_key_hex").toString(), state.auth_key)) {
-			continue;
-		}
-		result.states.insert(chatId, state);
-	}
-	return result;
-}
-
 SecretStore ReadStore(Main::Session *session) {
 	if (!session) {
 		return {};
@@ -410,16 +312,7 @@ SecretStore ReadStore(Main::Session *session) {
 		LOG(("1337 SecretChat: encrypted storage blob is unreadable, starting from empty store"));
 		return {};
 	}
-
-	// Keep existing developer test chats alive by importing the last JSON state
-	// once, then making the encrypted account-local blob authoritative.
-	auto legacy = LoadLegacyJsonStore();
-	if (!legacy.states.isEmpty()) {
-		session->local().writeBlob(kSecretStorageBlobKey, SerializeStore(legacy));
-		LOG(("1337 SecretChat: imported %1 legacy JSON secret chats")
-			.arg(legacy.states.size()));
-	}
-	return legacy;
+	return {};
 }
 
 bool WriteStore(Main::Session *session, const SecretStore &store) {
