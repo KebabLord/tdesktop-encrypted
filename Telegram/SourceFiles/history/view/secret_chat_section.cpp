@@ -5,7 +5,6 @@
 #include "chat_helpers/message_field.h"
 #include "history/history.h"
 #include "history/history_item.h"
-#include "lang/lang_keys.h"
 #include "ui/chat/chat_theme.h"
 #include "ui/controls/send_button.h"
 #include "ui/painter.h"
@@ -21,6 +20,7 @@
 #include "rpl/filter.h"
 
 #include <algorithm>
+#include <lang_auto.h>
 
 namespace HistoryView {
 
@@ -52,11 +52,11 @@ SecretChatWidget::SecretChatWidget(
 , _theme(Window::Theme::DefaultChatThemeOn(lifetime()))
 , _title(std::make_unique<Ui::FlatLabel>(
 		this,
-		rpl::single(QString("Secret Chat %1").arg(chatId)),
+		rpl::single(Data::SecretChats::Manager(&session()).DisplayNameForChat(chatId)),
 		st::previewName))
 , _status(std::make_unique<Ui::FlatLabel>(
 		this,
-		rpl::single(QString("Secret chat prototype")),
+		rpl::single(Data::SecretChats::Manager(&session()).DisplayStatusForChat(chatId)),
 		st::previewStatus))
 , _scroll(std::make_unique<Ui::ElasticScroll>(this))
 , _field(object_ptr<Ui::InputField>(
