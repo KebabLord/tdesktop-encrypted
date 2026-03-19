@@ -2,6 +2,7 @@
 
 #include "data/secret/secret_chat_state.h"
 #include "data/secret/secret_chat_types.h"
+#include "ui/text/text_entity.h"
 #include "rpl/event_stream.h"
 
 #include <QMap>
@@ -51,6 +52,7 @@ public:
 	[[nodiscard]] not_null<History*> ViewHistoryForChat(int64_t chatId);
 	[[nodiscard]] const std::vector<FullMsgId> &ViewMessageIds(int64_t chatId);
 	[[nodiscard]] rpl::producer<int64_t> messageUpdates() const;
+	[[nodiscard]] bool SendText(int64_t chatId, const QString &text);
 
 
 private:
@@ -60,6 +62,7 @@ private:
 	void EnsureEntryForChat(const SecretChatDescriptor &descriptor);
 	[[nodiscard]] RenderState &EnsureRenderState(int64_t chatId);
 	void AppendRenderedMessage(RenderState &state, const SecretParsedMessage &message);
+	void AdvanceIncomingState(const SecretParsedMessage &message);
 	void RefreshChatListEntry(not_null<Dialogs::SecretChatEntry*> entry);
 	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);
 	void RefreshKnownChats();

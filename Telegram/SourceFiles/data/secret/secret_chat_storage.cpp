@@ -67,6 +67,9 @@ bool SaveSecretChatState(const SecretChatState &state) {
 		{ "admin_id", QString::number(static_cast<qulonglong>(state.admin_id)) },
 		{ "participant_id", QString::number(static_cast<qulonglong>(state.participant_id)) },
 		{ "is_creator", QString::number(static_cast<qulonglong>(state.is_creator)) },
+		{ "layer", QString::number(state.layer) },
+		{ "incoming_sequence", QString::number(state.incoming_sequence) },
+		{ "outgoing_sequence", QString::number(state.outgoing_sequence) },
 		{ "key_fingerprint", QString::number(static_cast<qulonglong>(state.key_fingerprint)) },
 		{ "auth_key_hex", AuthKeyToHex(state.auth_key) },
 	};
@@ -154,6 +157,33 @@ std::optional<SecretChatState> LoadSecretChatState(int64_t chatId) {
 		return std::nullopt;
 	}
 
+	if (object.contains("layer")) {
+		state.layer = object.value("layer").toString().toInt(&ok);
+		if (!ok) {
+			LOG(("1337 SecretChat: invalid layer in state file %1")
+				.arg(SecretChatStatePath(chatId)));
+			return std::nullopt;
+		}
+	}
+
+	if (object.contains("incoming_sequence")) {
+		state.incoming_sequence = object.value("incoming_sequence").toString().toInt(&ok);
+		if (!ok) {
+			LOG(("1337 SecretChat: invalid incoming_sequence in state file %1")
+				.arg(SecretChatStatePath(chatId)));
+			return std::nullopt;
+		}
+	}
+
+	if (object.contains("outgoing_sequence")) {
+		state.outgoing_sequence = object.value("outgoing_sequence").toString().toInt(&ok);
+		if (!ok) {
+			LOG(("1337 SecretChat: invalid outgoing_sequence in state file %1")
+				.arg(SecretChatStatePath(chatId)));
+			return std::nullopt;
+		}
+	}
+
 	state.key_fingerprint = object.value("key_fingerprint").toString().toULongLong(&ok);
 	if (!ok) {
 		LOG(("1337 SecretChat: invalid key_fingerprint in state file %1")
@@ -167,10 +197,13 @@ std::optional<SecretChatState> LoadSecretChatState(int64_t chatId) {
 		return std::nullopt;
 	}
 
-	LOG(("1337 SecretChat: loaded state for chat_id=%1 key_fingerprint=%2 is_creator=%3")
+	LOG(("1337 SecretChat: loaded state for chat_id=%1 key_fingerprint=%2 is_creator=%3 layer=%4 in_seq=%5 out_seq=%6")
 		.arg(state.chat_id)
 		.arg(FormatUint64(state.key_fingerprint))
-		.arg(state.is_creator ? 1 : 0));
+		.arg(state.is_creator ? 1 : 0)
+		.arg(state.layer)
+		.arg(state.incoming_sequence)
+		.arg(state.outgoing_sequence));
 	return state;
 }
 

@@ -4,9 +4,13 @@
 #include "window/section_memento.h"
 #include "window/section_widget.h"
 
+#include <memory>
 #include <QtCore/QPointer>
 
-#include <memory>
+namespace Ui {
+class InputField;
+class SendButton;
+} // namespace Ui
 
 class History;
 
@@ -64,6 +68,7 @@ protected:
 	void doSetInnerFocus() override;
 
 private:
+	void submitField();
 	void updateInnerVisibleArea();
 
 	Context listContext() override;
@@ -130,6 +135,8 @@ private:
 	const std::unique_ptr<Ui::FlatLabel> _title;
 	const std::unique_ptr<Ui::FlatLabel> _status;
 	const std::unique_ptr<Ui::ElasticScroll> _scroll;
+	const object_ptr<Ui::InputField> _field;
+	const std::shared_ptr<Ui::SendButton> _send;
 	QPointer<ListWidget> _inner;
 };
 

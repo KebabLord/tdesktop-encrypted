@@ -119,4 +119,43 @@ QString SecretMediaConstructorName(uint32_t constructor) {
 	}
 }
 
+// Append a little-endian uint32 TL field.
+void AppendUInt32(QByteArray &data, uint32_t value) {
+	data.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+// Append a little-endian int32 TL field.
+void AppendInt32(QByteArray &data, int32_t value) {
+	AppendUInt32(data, static_cast<uint32_t>(value));
+}
+
+// Append a little-endian uint64 TL field.
+void AppendUInt64(QByteArray &data, uint64_t value) {
+	data.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+// Append a TL bytes field with 4-byte padding.
+void AppendTLBytes(QByteArray &data, const QByteArray &value) {
+	const auto size = value.size();
+	if (size < 254) {
+		data.push_back(char(size));
+	} else {
+		data.push_back(char(254));
+		data.push_back(char(size & 0xFF));
+		data.push_back(char((size >> 8) & 0xFF));
+		data.push_back(char((size >> 16) & 0xFF));
+	}
+	data.append(value);
+	const auto header = (size < 254) ? 1 : 4;
+	const auto padded = ((header + size) + 3) & ~3;
+	for (auto i = header + size; i != padded; ++i) {
+		data.push_back(char(0));
+	}
+}
+
+// Append a UTF-8 TL string field.
+void AppendTLString(QByteArray &data, const QString &value) {
+	AppendTLBytes(data, value.toUtf8());
+}
+
 } // namespace Data::SecretChats

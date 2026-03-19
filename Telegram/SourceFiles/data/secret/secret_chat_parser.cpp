@@ -164,6 +164,12 @@ std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 		.arg(randomBytes->size())
 		.arg(BytesToHex(*randomBytes)));
 
+	const auto envelope = SecretParsedEnvelope{
+		.layer = *layer,
+		.inSeqNo = *inSeqNo,
+		.outSeqNo = *outSeqNo,
+	};
+
 	const auto innerConstructor = reader.ReadUInt32();
 	if (!innerConstructor.has_value()) {
 		LOG(("1335 SecretChat: %1 missing inner constructor chat_id=%2")
@@ -225,6 +231,7 @@ std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 
 			return SecretParsedUnsupportedMessage{
 				.chatId = chatId,
+				.envelope = envelope,
 				.constructor = *mediaConstructor,
 				.description = SecretMediaConstructorName(*mediaConstructor),
 			};
@@ -293,6 +300,7 @@ std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 
 		return SecretParsedTextMessage{
 			.chatId = chatId,
+			.envelope = envelope,
 			.randomId = *randomId,
 			.flags = *flags,
 			.ttl = *ttl,
@@ -321,6 +329,7 @@ std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 
 		return SecretParsedServiceMessage{
 			.chatId = chatId,
+			.envelope = envelope,
 			.randomId = *randomId,
 			.actionConstructor = *actionConstructor,
 		};
@@ -334,6 +343,7 @@ std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 
 		return SecretParsedUnsupportedMessage{
 			.chatId = chatId,
+			.envelope = envelope,
 			.constructor = *innerConstructor,
 			.description = QString("inner %1").arg(FormatUint32Hex(*innerConstructor)),
 		};

@@ -2,6 +2,7 @@
 #include "data/secret/secret_chat_crypto.h"
 #include "data/secret/secret_chat_parser.h"
 #include "data/secret/secret_chat_storage.h"
+#include "data/secret/secret_chat_tl.h"
 #include "data/secret/secret_chat_types.h"
 #include "data/data_peer.h"
 #include "data/data_session.h"
@@ -11,6 +12,7 @@
 #include "history/history_item.h"
 
 #include "base/unixtime.h"
+#include "base/random.h"
 #include "logs.h"
 #include "main/main_session.h"
 #include "mtproto/mtproto_config.h"
@@ -31,6 +33,41 @@ struct SecretChatManager::RenderState {
 
 namespace {
 
+// Transform a raw incoming counter into the protected seq_no form.
+[[nodiscard]] int32_t SecretInSeqNo(
+		const SecretChatState &state,
+		int32_t raw) {
+	const auto parity = state.is_creator ? 0 : 1;
+	return (raw * 2) + parity;
+}
+
+// Transform a raw outgoing counter into the protected seq_no form.
+[[nodiscard]] int32_t SecretOutSeqNo(
+		const SecretChatState &state,
+		int32_t raw) {
+	const auto parity = state.is_creator ? 1 : 0;
+	return (raw * 2) + parity;
+}
+
+// Recover the raw incoming counter from a received out_seq_no.
+[[nodiscard]] std::optional<int32_t> RawIncomingSequence(
+		const SecretChatState &state,
+		int32_t outSeqNo) {
+	const auto parity = state.is_creator ? 0 : 1;
+	if ((outSeqNo < parity) || (((outSeqNo - parity) % 2) != 0)) {
+		return std::nullopt;
+	}
+	return (outSeqNo - parity) / 2;
+}
+
+// Read the common envelope metadata from any parsed secret message.
+[[nodiscard]] const SecretParsedEnvelope &MessageEnvelope(
+		const SecretParsedMessage &message) {
+	return std::visit([](const auto &value) -> const SecretParsedEnvelope& {
+		return value.envelope;
+	}, message);
+}
+
 [[nodiscard]] QString RenderMessageText(const SecretParsedMessage &message) {
 	QString line;
 	std::visit([&](const auto &value) {
@@ -48,6 +85,30 @@ namespace {
 		}
 	}, message);
 	return line;
+}
+
+// Serialize a minimal decrypted secret text message body.
+[[nodiscard]] QByteArray SerializeSecretTextBody(
+		const SecretChatState &state,
+		uint64_t randomId,
+		const QString &text) {
+	auto body = QByteArray();
+	AppendUInt32(body, kSecretOuterLayerConstructor);
+
+	auto randomBytes = QByteArray(kMinSecretRandomBytes, Qt::Uninitialized);
+	for (auto i = 0; i != randomBytes.size(); ++i) {
+		randomBytes[i] = char(base::RandomValue<uchar>());
+	}
+	AppendTLBytes(body, randomBytes);
+	AppendInt32(body, state.layer);
+	AppendInt32(body, SecretInSeqNo(state, state.incoming_sequence));
+	AppendInt32(body, SecretOutSeqNo(state, state.outgoing_sequence));
+	AppendUInt32(body, kSecretInnerMessageV73);
+	AppendUInt32(body, 0);
+	AppendUInt64(body, randomId);
+	AppendInt32(body, 0);
+	AppendTLString(body, text);
+	return body;
 }
 
 [[nodiscard]] PeerId EnsureFakeSecretPeer(
@@ -132,17 +193,46 @@ auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
 void SecretChatManager::AppendRenderedMessage(
 		RenderState &state,
 		const SecretParsedMessage &message) {
+	const auto &envelope = MessageEnvelope(message);
 	auto fields = HistoryItemCommonFields{
 		.id = state.history->nextNonHistoryEntryId(),
-		.flags = (MessageFlag::FakeHistoryItem | MessageFlag::HasFromId),
-		.from = state.peerId,
-		.date = base::unixtime::now(),
+		.flags = (MessageFlag::FakeHistoryItem
+			| MessageFlag::HasFromId
+			| (envelope.outgoing ? MessageFlag::Outgoing : MessageFlag())),
+		.from = envelope.outgoing
+			? _session->userPeerId()
+			: state.peerId,
+		.date = envelope.date ? envelope.date : base::unixtime::now(),
 	};
 	const auto item = state.history->addNewLocalMessage(
 		std::move(fields),
 		TextWithEntities{ .text = RenderMessageText(message) },
 		MTP_messageMediaEmpty());
 	state.ids.push_back(item->fullId());
+}
+
+// Update the persisted incoming sequence counters from an inbound message.
+void SecretChatManager::AdvanceIncomingState(const SecretParsedMessage &message) {
+	const auto &envelope = MessageEnvelope(message);
+	if (envelope.outgoing) {
+		return;
+	}
+	const auto chatId = std::visit([](const auto &value) {
+		return value.chatId;
+	}, message);
+	auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		return;
+	}
+	if (envelope.layer > state->layer) {
+		state->layer = envelope.layer;
+	}
+	const auto incomingSequence = RawIncomingSequence(*state, envelope.outSeqNo);
+	if (incomingSequence.has_value()
+		&& (*incomingSequence > state->incoming_sequence)) {
+		state->incoming_sequence = *incomingSequence;
+	}
+	SaveState(*state);
 }
 
 void SecretChatManager::RefreshChatListEntry(
@@ -308,6 +398,7 @@ void SecretChatManager::HandleEncryptedChatRequested(
 					state.admin_id = static_cast<uint64>(accepted.vadmin_id().v);
 					state.participant_id = static_cast<uint64>(accepted.vparticipant_id().v);
 					state.is_creator = false; // The remote side requested this chat; we are the acceptor.
+					state.layer = 73;
 					state.key_fingerprint = keyFingerprint;
 					state.auth_key = paddedAuthKey;
 
@@ -447,6 +538,7 @@ SecretChatManager &Manager(not_null<Main::Session*> session) {
 void SecretChatManager::StoreParsedMessage(
 		int64_t chatId,
 		SecretParsedMessage message) {
+	AdvanceIncomingState(message);
 	if (const auto state = LoadState(chatId); state.has_value()) {
 		EnsureEntryForChat(SecretChatDescriptor{
 			.chatId = state->chat_id,
@@ -470,6 +562,72 @@ void SecretChatManager::StoreParsedMessage(
 		RefreshChatListEntry(i->second.get());
 	}
 	_messageUpdates.fire_copy(chatId);
+}
+
+// Encrypt and send a plain-text secret message through messages.sendEncrypted.
+bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
+	if (text.trimmed().isEmpty()) {
+		return false;
+	}
+	auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		LOG(("1338 SecretChat: send skipped, missing state chat_id=%1")
+			.arg(chatId));
+		return false;
+	}
+
+	const auto randomId = base::RandomValue<uint64>();
+	const auto body = SerializeSecretTextBody(*state, randomId, text);
+	const auto payload = EncryptSecretChatPayloadMtproto2(*state, body);
+	if (!payload.has_value()) {
+		LOG(("1338 SecretChat: send encryption failed chat_id=%1 random_id=%2")
+			.arg(chatId)
+			.arg(FormatUint64(randomId)));
+		return false;
+	}
+
+	++state->outgoing_sequence;
+	SaveState(*state);
+
+	LOG(("1338 SecretChat: sending encrypted text chat_id=%1 random_id=%2 text=%3 out_seq=%4")
+		.arg(chatId)
+		.arg(FormatUint64(randomId))
+		.arg(text)
+		.arg(state->outgoing_sequence));
+
+	_session->api().request(MTPmessages_SendEncrypted(
+		MTP_flags(0),
+		MTP_inputEncryptedChat(
+			MTP_int(chatId),
+			MTP_long(state->access_hash)),
+		MTP_long(randomId),
+		MTP_bytes(*payload)
+	)).done([=](const MTPmessages_SentEncryptedMessage &result) {
+		auto message = SecretParsedTextMessage{
+			.chatId = chatId,
+			.envelope = SecretParsedEnvelope{
+				.layer = state->layer,
+				.inSeqNo = SecretInSeqNo(*state, state->incoming_sequence),
+				.outSeqNo = SecretOutSeqNo(*state, state->outgoing_sequence - 1),
+				.outgoing = true,
+			},
+			.randomId = randomId,
+			.text = text,
+		};
+		result.match([&](const MTPDmessages_sentEncryptedMessage &data) {
+			message.envelope.date = data.vdate().v;
+		}, [&](const MTPDmessages_sentEncryptedFile &data) {
+			message.envelope.date = data.vdate().v;
+		});
+		StoreParsedMessage(chatId, std::move(message));
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1338 SecretChat: sendEncrypted failed chat_id=%1 random_id=%2 error=%3")
+			.arg(chatId)
+			.arg(FormatUint64(randomId))
+			.arg(error.type()));
+	}).send();
+
+	return true;
 }
 
 const QVector<SecretParsedMessage> &SecretChatManager::Messages(int64_t chatId) const {

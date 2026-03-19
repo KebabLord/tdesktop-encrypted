@@ -2,15 +2,20 @@
 
 #include "data/secret/secret_chat_manager.h"
 #include "dialogs/dialogs_key.h"
+#include "chat_helpers/message_field.h"
 #include "history/history.h"
 #include "history/history_item.h"
+#include "lang/lang_keys.h"
 #include "ui/chat/chat_theme.h"
+#include "ui/controls/send_button.h"
 #include "ui/painter.h"
 #include "ui/widgets/elastic_scroll.h"
+#include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
 #include "window/themes/window_theme.h"
 
 #include "styles/style_chat.h"
+#include "styles/style_chat_helpers.h"
 #include "styles/style_settings.h"
 
 #include "rpl/filter.h"
@@ -51,11 +56,19 @@ SecretChatWidget::SecretChatWidget(
 		st::previewName))
 , _status(std::make_unique<Ui::FlatLabel>(
 		this,
-		rpl::single(QString("Read-only secret chat")),
+		rpl::single(QString("Secret chat prototype")),
 		st::previewStatus))
-, _scroll(std::make_unique<Ui::ElasticScroll>(this)) {
+, _scroll(std::make_unique<Ui::ElasticScroll>(this))
+, _field(object_ptr<Ui::InputField>(
+		this,
+		st::historyComposeField,
+		Ui::InputField::Mode::MultiLine,
+		tr::lng_message_ph()))
+, _send(std::make_shared<Ui::SendButton>(this, st::historySend)) {
 	_title->setAttribute(Qt::WA_TransparentForMouseEvents);
 	_status->setAttribute(Qt::WA_TransparentForMouseEvents);
+	InitMessageField(controller, _field, nullptr);
+	_send->show();
 	_inner = _scroll->setOwnedWidget(object_ptr<ListWidget>(
 		this,
 		&session(),
@@ -71,8 +84,14 @@ SecretChatWidget::SecretChatWidget(
 	}, lifetime());
 	_inner->refreshViewer();
 	crl::on_main(this, [=] {
-		_inner->setFocus();
+		_field->setFocusFast();
 	});
+	_field->submits() | rpl::on_next([=] {
+		submitField();
+	}, lifetime());
+	_send->clicks() | rpl::on_next([=] {
+		submitField();
+	}, lifetime());
 	Data::SecretChats::Manager(&session()).messageUpdates(
 	) | rpl::filter([=](int64_t updatedChatId) {
 		return updatedChatId == _chatId;
@@ -130,8 +149,16 @@ void SecretChatWidget::resizeEvent(QResizeEvent *e) {
 	_title->move(st::previewTop.namePosition);
 	_status->resizeToNaturalWidth(width() - st::previewTop.statusPosition.x());
 	_status->move(st::previewTop.statusPosition);
-	_scroll->setGeometry(rect().marginsRemoved({ 0, st::previewTop.height, 0, 0 }));
+	const auto composeHeight = _field->height() + 2 * st::historySendPadding;
+	_scroll->setGeometry(rect().marginsRemoved({ 0, st::previewTop.height, 0, composeHeight }));
 	_inner->resizeToWidth(_scroll->width(), _scroll->height());
+	const auto fieldWidth = width() - st::historySendRight - _send->width();
+	_field->resizeToWidth(fieldWidth);
+	_field->moveToLeft(
+		st::historySendPadding,
+		height() - composeHeight + st::historySendPadding,
+		width());
+	_send->moveToRight(0, height() - st::historySendSize.height(), width());
 	updateInnerVisibleArea();
 }
 
@@ -142,13 +169,24 @@ void SecretChatWidget::paintEvent(QPaintEvent *e) {
 		_theme.get(),
 		QSize(width(), height() * 2),
 		e->rect());
+	p.fillRect(0, height() - st::historySendSize.height(), width(), st::historySendSize.height(), st::historyComposeAreaBg);
 	p.fillRect(0, 0, width(), st::previewTop.height, st::topBarBg);
 	p.fillRect(0, st::previewTop.height, width(), st::lineWidth, st::shadowFg);
+	p.fillRect(0, height() - st::historySendSize.height() - st::lineWidth, width(), st::lineWidth, st::shadowFg);
 }
 
 void SecretChatWidget::doSetInnerFocus() {
-	if (_inner) {
-		_inner->setFocus();
+	_field->setFocusFast();
+}
+
+// Submit the current plain-text field content into the secret-chat manager.
+void SecretChatWidget::submitField() {
+	if (!HasSendText(_field)) {
+		return;
+	}
+	const auto text = _field->getTextWithAppliedMarkdown().text;
+	if (Data::SecretChats::Manager(&session()).SendText(_chatId, text)) {
+		_field->setText(QString());
 	}
 }
 

@@ -11,4 +11,8 @@ std::optional<QByteArray> DecryptSecretChatPayloadMtproto2(
 	const SecretChatState &state,
 	const QByteArray &payload);
 
+std::optional<QByteArray> EncryptSecretChatPayloadMtproto2(
+	const SecretChatState &state,
+	const QByteArray &body);
+
 } // namespace Data::SecretChats

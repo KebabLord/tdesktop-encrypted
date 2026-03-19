@@ -22,6 +22,12 @@ QString BytesToHex(const QByteArray &data, int maxBytes = -1);
 QString SecretMessageEntityName(uint32_t constructor);
 QString SecretMediaConstructorName(uint32_t constructor);
 
+void AppendUInt32(QByteArray &data, uint32_t value);
+void AppendInt32(QByteArray &data, int32_t value);
+void AppendUInt64(QByteArray &data, uint64_t value);
+void AppendTLBytes(QByteArray &data, const QByteArray &value);
+void AppendTLString(QByteArray &data, const QString &value);
+
 struct SecretTlReader {
 	const QByteArray &data;
 	int offset = 0;
