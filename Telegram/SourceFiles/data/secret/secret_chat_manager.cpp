@@ -15,7 +15,6 @@
 #include "base/random.h"
 #include "logs.h"
 #include "main/main_session.h"
-#include "mtproto/mtproto_config.h"
 #include "mtproto/mtproto_dh_utils.h"
 #include "apiwrap.h"
 
@@ -146,11 +145,21 @@ namespace {
 SecretChatManager::SecretChatManager(not_null<Main::Session*> session)
 : _session(session) {
 	RefreshKnownChats();
+	RestoreMessagesFromStorage();
 	EnsureEntriesFromKnownChats();
 }
 
 void SecretChatManager::RefreshKnownChats() {
-	_knownChats = LoadAllSecretChats();
+	_knownChats = LoadAllSecretChats(_session);
+}
+
+void SecretChatManager::RestoreMessagesFromStorage() {
+	for (const auto &descriptor : _knownChats) {
+		const auto messages = LoadSecretChatMessages(_session, descriptor.chatId);
+		if (!messages.isEmpty()) {
+			_messages.insert(descriptor.chatId, messages);
+		}
+	}
 }
 
 void SecretChatManager::EnsureEntriesFromKnownChats() {
@@ -501,7 +510,7 @@ void SecretChatManager::LogEncryptionChat(const MTPEncryptedChat &chat, const ch
 }
 
 bool SecretChatManager::SaveState(const SecretChatState &state) const {
-	const auto saved = SaveSecretChatState(state);
+	const auto saved = SaveSecretChatState(_session, state);
 	if (saved) {
 		auto that = const_cast<SecretChatManager*>(this);
 		that->RefreshKnownChats();
@@ -520,7 +529,7 @@ const QVector<SecretChatDescriptor> &SecretChatManager::KnownChats() const {
 }
 
 std::optional<SecretChatState> SecretChatManager::LoadState(int64_t chatId) const {
-	return LoadSecretChatState(chatId);
+	return LoadSecretChatState(_session, chatId);
 }
 
 SecretChatManager &Manager(not_null<Main::Session*> session) {
@@ -550,6 +559,7 @@ void SecretChatManager::StoreParsedMessage(
 	}
 	auto &list = _messages[chatId];
 	list.push_back(std::move(message));
+	SaveSecretChatMessages(_session, chatId, list);
 	LOG(("1335 SecretChat: stored parsed message chat_id=%1 total=%2")
 		.arg(chatId)
 		.arg(list.size()));

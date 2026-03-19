@@ -2,7 +2,6 @@
 
 #include "data/secret/secret_chat_state.h"
 #include "data/secret/secret_chat_types.h"
-#include "ui/text/text_entity.h"
 #include "rpl/event_stream.h"
 
 #include <QMap>
@@ -59,6 +58,7 @@ private:
 	struct RenderState;
 
 	void EnsureEntriesFromKnownChats();
+	void RestoreMessagesFromStorage();
 	void EnsureEntryForChat(const SecretChatDescriptor &descriptor);
 	[[nodiscard]] RenderState &EnsureRenderState(int64_t chatId);
 	void AppendRenderedMessage(RenderState &state, const SecretParsedMessage &message);
