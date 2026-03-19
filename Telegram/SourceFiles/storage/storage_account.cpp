@@ -3662,6 +3662,18 @@ QByteArray Account::readBotStorage(PeerId botId) {
 	return result;
 }
 
+void Account::writeBlob(std::string_view key, const QByteArray &value) {
+	if (value.isEmpty()) {
+		clearPref(key);
+		return;
+	}
+	writePrefGeneric(key, value);
+}
+
+QByteArray Account::readBlob(std::string_view key) {
+	return readPrefGeneric(key).value_or(QByteArray());
+}
+
 bool Account::encrypt(
 		const void *src,
 		void *dst,

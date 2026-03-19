@@ -208,6 +208,9 @@ public:
 	void writeBotStorage(PeerId botId, const QByteArray &serialized);
 	[[nodiscard]] QByteArray readBotStorage(PeerId botId);
 
+	void writeBlob(std::string_view key, const QByteArray &value);
+	[[nodiscard]] QByteArray readBlob(std::string_view key);
+
 	[[nodiscard]] bool encrypt(
 		const void *src,
 		void *dst,
