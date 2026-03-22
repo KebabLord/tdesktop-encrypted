@@ -28,6 +28,8 @@ namespace HistoryView {
 namespace {
 
 const auto kSecretChatNameColor = QColor(0x4E, 0xAD, 0x41);
+constexpr auto kSecretChatIconOffset = QPoint(-3, -2);
+constexpr auto kSecretChatIconTextSkip = 0;
 
 void PaintTintedIcon(
 		Painter &p,
@@ -174,8 +176,9 @@ void SecretChatWidget::checkActivation() {
 void SecretChatWidget::resizeEvent(QResizeEvent *e) {
 	SectionWidget::resizeEvent(e);
 	const auto titleLeft = st::previewTop.namePosition.x()
+		+ kSecretChatIconOffset.x()
 		+ st::dialogsUnlockIcon.width()
-		+ st::dialogsChatTypeSkip;
+		+ kSecretChatIconTextSkip;
 	_title->resizeToNaturalWidth(width() - titleLeft);
 	_title->move(titleLeft, st::previewTop.namePosition.y());
 	_status->resizeToNaturalWidth(width() - st::previewTop.statusPosition.x());
@@ -205,7 +208,7 @@ void SecretChatWidget::paintEvent(QPaintEvent *e) {
 	PaintTintedIcon(
 		p,
 		st::dialogsUnlockIcon,
-		st::previewTop.namePosition,
+		st::previewTop.namePosition + kSecretChatIconOffset,
 		kSecretChatNameColor);
 	p.fillRect(0, st::previewTop.height, width(), st::lineWidth, st::shadowFg);
 	p.fillRect(0, height() - st::historySendSize.height() - st::lineWidth, width(), st::lineWidth, st::shadowFg);

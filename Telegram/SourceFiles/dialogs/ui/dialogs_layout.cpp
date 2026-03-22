@@ -55,6 +55,8 @@ namespace {
 
 const auto kPsaBadgePrefix = "cloud_lng_badge_psa_";
 const auto kSecretChatNameColor = QColor(0x4E, 0xAD, 0x41);
+constexpr auto kSecretChatIconOffset = QPoint(-3, -2);
+constexpr auto kSecretChatIconTextSkip = 0;
 
 void PaintTintedIcon(
 		Painter &p,
@@ -513,11 +515,12 @@ void PaintRow(
 		PaintTintedIcon(
 			p,
 			st::dialogsUnlockIcon,
-			rectForName.topLeft(),
+			rectForName.topLeft() + kSecretChatIconOffset,
 			kSecretChatNameColor);
 		rectForName.setLeft(rectForName.left()
+			+ kSecretChatIconOffset.x()
 			+ st::dialogsUnlockIcon.width()
-			+ st::dialogsChatTypeSkip);
+			+ kSecretChatIconTextSkip);
 	}
 	auto texttop = context.st->textTop;
 	if (const auto folder = entry->asFolder()) {
