@@ -217,9 +217,11 @@ namespace {
 
 [[nodiscard]] PeerId EnsureFakeSecretPeer(
 		not_null<Data::Session*> owner,
-		int64_t chatId) {
-	const auto name = QString("Secret Chat %1").arg(chatId);
-	const auto peerId = Data::FakePeerIdForJustName(name);
+		int64_t chatId,
+		const QString &displayName) {
+	const auto seedName = QString("Secret Chat %1").arg(chatId);
+	const auto peerId = Data::FakePeerIdForJustName(seedName);
+	const auto name = displayName.isEmpty() ? seedName : displayName;
 	owner->processUser(MTP_user(
 		MTP_flags(MTPDuser::Flag::f_first_name | MTPDuser::Flag::f_min),
 		peerToBareMTPInt(peerId),
@@ -334,7 +336,10 @@ auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
 	if (const auto i = _rendered.find(chatId); i != end(_rendered)) {
 		return *i->second;
 	}
-	const auto peerId = EnsureFakeSecretPeer(&_session->data(), chatId);
+	const auto peerId = EnsureFakeSecretPeer(
+		&_session->data(),
+		chatId,
+		DisplayNameForChat(chatId));
 	auto state = std::make_unique<RenderState>(RenderState{
 		.peerId = peerId,
 		.history = _session->data().history(peerId),
@@ -354,13 +359,20 @@ void SecretChatManager::AppendRenderedMessage(
 		RenderState &state,
 		const SecretParsedMessage &message) {
 	const auto &envelope = MessageEnvelope(message);
+	const auto chatId = std::visit([](const auto &value) {
+		return value.chatId;
+	}, message);
+	const auto remotePeerId = [&] {
+		const auto loaded = DisplayUserForChat(chatId);
+		return loaded ? loaded->id : state.peerId;
+	}();
 	auto fields = HistoryItemCommonFields{
 		.id = state.history->nextNonHistoryEntryId(),
 		.flags = (MessageFlag::HasFromId
 			| (envelope.outgoing ? MessageFlag::Outgoing : MessageFlag())),
 		.from = envelope.outgoing
 			? _session->userPeerId()
-			: state.peerId,
+			: remotePeerId,
 		.date = envelope.date ? envelope.date : base::unixtime::now(),
 	};
 	if (const auto text = std::get_if<SecretParsedTextMessage>(&message);
