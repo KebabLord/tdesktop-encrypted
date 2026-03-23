@@ -4911,7 +4911,6 @@ bool HistoryWidget::sendSecretText(Api::SendOptions options) {
 		return false;
 	}
 	if (_editMsgId
-		|| _replyTo
 		|| readyToForward()
 		|| _kbReplyTo
 		|| options.scheduled
@@ -4931,11 +4930,15 @@ bool HistoryWidget::sendSecretText(Api::SendOptions options) {
 		textWithTags.text,
 		TextUtilities::ConvertTextTagsToEntities(textWithTags.tags) };
 	TextUtilities::PrepareForSending(text, prepareFlags);
-	if (!Data::SecretChats::Manager(&session()).SendText(*chatId, text)) {
+	if (!Data::SecretChats::Manager(&session()).SendText(
+			*chatId,
+			text,
+			replyTo())) {
 		return true;
 	}
 
 	clearFieldText();
+	cancelReply(false);
 	if (_preview) {
 		_preview->apply({ .removed = true });
 	}
@@ -8895,7 +8898,8 @@ void HistoryWidget::processReply() {
 		}
 		return processCancel();
 #endif
-	} else if (!_processingReplyItem->isRegular()) {
+	} else if (!_processingReplyItem->isRegular()
+		&& !shownSecretChatId()) {
 		return processCancel();
 	} else if (const auto forum = _peer->forum()
 		; forum && _processingReplyItem->history() == _history) {

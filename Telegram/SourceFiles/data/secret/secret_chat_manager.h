@@ -62,7 +62,8 @@ public:
 	[[nodiscard]] rpl::producer<int64_t> presentationUpdates() const;
 	[[nodiscard]] bool SendText(
 		int64_t chatId,
-		const ::TextWithEntities &textWithEntities);
+		const ::TextWithEntities &textWithEntities,
+		const FullReplyTo &replyTo = FullReplyTo());
 	[[nodiscard]] bool DeleteChat(int64_t chatId);
 	[[nodiscard]] UserData *DisplayUserForChat(int64_t chatId) const;
 	[[nodiscard]] QString DisplayNameForChat(int64_t chatId) const;

@@ -42,6 +42,7 @@ struct SecretChatManager::RenderState {
 	not_null<History*> history;
 	std::vector<FullMsgId> ids;
 	std::map<uint64_t, FullMsgId> randomIds;
+	std::map<FullMsgId, uint64_t> reverseRandomIds;
 };
 
 namespace {
@@ -293,7 +294,8 @@ void AppendSecretMessageEntities(
 		uint64_t randomId,
 		const TextWithEntities &textWithEntities,
 		uint32_t flags,
-		const QVector<SecretParsedEntity> &entities) {
+		const QVector<SecretParsedEntity> &entities,
+		uint64_t replyToRandomId) {
 	auto body = QByteArray();
 	AppendUInt32(body, kSecretOuterLayerConstructor);
 
@@ -312,6 +314,9 @@ void AppendSecretMessageEntities(
 	AppendTLString(body, textWithEntities.text);
 	if (!entities.isEmpty()) {
 		AppendSecretMessageEntities(body, entities);
+	}
+	if (replyToRandomId) {
+		AppendUInt64(body, replyToRandomId);
 	}
 	return body;
 }
@@ -491,6 +496,7 @@ void SecretChatManager::AppendRenderedMessage(
 	state.ids.push_back(item->fullId());
 	if (const auto randomId = MessageRandomId(message)) {
 		state.randomIds.emplace(randomId, item->fullId());
+		state.reverseRandomIds.emplace(item->fullId(), randomId);
 	}
 	_session->changes().messageUpdated(
 		item,
@@ -867,7 +873,8 @@ void SecretChatManager::StoreParsedMessage(
 
 bool SecretChatManager::SendText(
 		int64_t chatId,
-		const ::TextWithEntities &textWithEntities) {
+		const ::TextWithEntities &textWithEntities,
+		const FullReplyTo &replyTo) {
 	if (textWithEntities.text.trimmed().isEmpty()) {
 		return false;
 	}
@@ -880,13 +887,25 @@ bool SecretChatManager::SendText(
 
 	const auto randomId = base::RandomValue<uint64>();
 	const auto entities = SecretEntitiesFromText(textWithEntities);
-	const auto flags = uint32_t(entities.isEmpty() ? 0 : (1 << 7));
+	auto replyToRandomId = uint64_t(0);
+	if (replyTo.messageId) {
+		const auto &render = EnsureRenderState(chatId);
+		if (const auto i = render.reverseRandomIds.find(replyTo.messageId)
+			; i != end(render.reverseRandomIds)) {
+			replyToRandomId = i->second;
+		}
+	}
+	auto flags = uint32_t(entities.isEmpty() ? 0 : (1 << 7));
+	if (replyToRandomId) {
+		flags |= (1 << 3);
+	}
 	const auto body = SerializeSecretTextBody(
 		*state,
 		randomId,
 		textWithEntities,
 		flags,
-		entities);
+		entities,
+		replyToRandomId);
 	const auto payload = EncryptSecretChatPayloadMtproto2(*state, body);
 	if (!payload.has_value()) {
 		LOG(("1338 SecretChat: send encryption failed chat_id=%1 random_id=%2")
@@ -921,6 +940,7 @@ bool SecretChatManager::SendText(
 				.outgoing = true,
 			},
 			.randomId = randomId,
+			.replyToRandomId = replyToRandomId,
 			.flags = flags,
 			.text = textWithEntities.text,
 			.entities = entities,

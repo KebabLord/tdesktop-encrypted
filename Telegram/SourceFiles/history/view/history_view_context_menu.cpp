@@ -606,15 +606,17 @@ bool AddReplyToMessageAction(
 		: request.item;
 	const auto topic = item ? item->topic() : nullptr;
 	const auto peer = item ? item->history()->peer.get() : nullptr;
+	const auto secretChat = item
+		? Data::SecretChats::Manager(
+			&item->history()->session()).ChatIdForHistory(item->history())
+		: std::optional<int64_t>();
 	if (!item
-		|| !item->isRegular()
+		|| (!item->isRegular() && !secretChat)
 		|| (context != Context::History
 			&& context != Context::Replies
 			&& context != Context::Monoforum)) {
 		return false;
 	}
-	const auto secretChat = Data::SecretChats::Manager(
-		&item->history()->session()).ChatIdForHistory(item->history());
 	const auto canSendReply = secretChat.has_value()
 		? true
 		: topic
