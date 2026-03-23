@@ -1214,7 +1214,7 @@ void HistoryWidget::initVoiceRecordBar() {
 
 	_voiceRecordBar->sendActionUpdates(
 	) | rpl::on_next([=](const auto &data) {
-		if (!_history) {
+		if (!_history || shownSecretChatId()) {
 			return;
 		}
 		session().sendProgressManager().update(
@@ -4112,6 +4112,9 @@ void HistoryWidget::firstLoadMessages() {
 	if (!_history || _firstLoadRequest) {
 		return;
 	}
+	if (shownSecretChatId()) {
+		return;
+	}
 
 	auto from = _history;
 	auto offsetId = MsgId();
@@ -4181,6 +4184,9 @@ void HistoryWidget::loadMessages() {
 	if (!_history || _preloadRequest) {
 		return;
 	}
+	if (shownSecretChatId()) {
+		return;
+	}
 
 	if (_history->isEmpty() && _migrated && _migrated->isEmpty()) {
 		return firstLoadMessages();
@@ -4237,6 +4243,9 @@ void HistoryWidget::loadMessages() {
 
 void HistoryWidget::loadMessagesDown() {
 	if (!_history || _preloadDownRequest) {
+		return;
+	}
+	if (shownSecretChatId()) {
 		return;
 	}
 
@@ -4305,6 +4314,9 @@ void HistoryWidget::delayedShowAt(
 		MsgId showAtMsgId,
 		const Window::SectionShow &params) {
 	if (!_history) {
+		return;
+	}
+	if (shownSecretChatId()) {
 		return;
 	}
 	_delayedShowAtMsgParams = params;
