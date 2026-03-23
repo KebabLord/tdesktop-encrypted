@@ -71,10 +71,12 @@ public:
 
 private:
 	struct RenderState;
+	using States = std::map<int64_t, SecretChatState>;
 
 	void EnsureEntriesFromKnownChats();
 	void RestoreMessagesFromStorage();
 	void EnsureEntryForChat(const SecretChatDescriptor &descriptor);
+	void UpsertKnownChat(const SecretChatState &state);
 	[[nodiscard]] RenderState &EnsureRenderState(int64_t chatId);
 	void AppendRenderedMessage(RenderState &state, const SecretParsedMessage &message);
 	void AdvanceIncomingState(const SecretParsedMessage &message);
@@ -84,6 +86,7 @@ private:
 	void RefreshPresentation(int64_t chatId);
 	void ClearTyping(int64_t chatId);
 	not_null<Main::Session*> _session;
+	States _states;
 	QMap<int64_t, QVector<SecretParsedMessage>> _messages;
 	QVector<SecretChatDescriptor> _knownChats;
 	std::map<int64_t, std::unique_ptr<Dialogs::SecretChatEntry>> _entries;

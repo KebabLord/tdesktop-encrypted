@@ -94,6 +94,17 @@ namespace {
 	return resolved ? std::optional<UserId>(resolved) : std::nullopt;
 }
 
+[[nodiscard]] SecretChatDescriptor DescriptorFromState(
+		const SecretChatState &state) {
+	return SecretChatDescriptor{
+		.chatId = state.chat_id,
+		.accessHash = state.access_hash,
+		.adminId = state.admin_id,
+		.participantId = state.participant_id,
+		.isCreator = state.is_creator,
+	};
+}
+
 [[nodiscard]] QString RenderMessageText(const SecretParsedMessage &message) {
 	QString line;
 	std::visit([&](const auto &value) {
@@ -185,8 +196,9 @@ SecretChatManager::SecretChatManager(not_null<Main::Session*> session)
 		if (!user) {
 			return;
 		}
-		for (const auto &[chatId, entry] : _entries) {
-			if (DisplayUserForChat(chatId) != user) {
+		for (const auto &[chatId, state] : _states) {
+			const auto remoteUserId = RemoteUserIdForState(_session, state);
+			if (!remoteUserId || (*remoteUserId != user->id)) {
 				continue;
 			}
 			RefreshPresentation(chatId);
@@ -203,6 +215,12 @@ void SecretChatManager::FinishInitialization() {
 
 void SecretChatManager::RefreshKnownChats() {
 	_knownChats = LoadAllSecretChats(_session);
+	_states.clear();
+	for (const auto &descriptor : _knownChats) {
+		if (const auto state = LoadSecretChatState(_session, descriptor.chatId)) {
+			_states.emplace(descriptor.chatId, *state);
+		}
+	}
 }
 
 void SecretChatManager::RestoreMessagesFromStorage() {
@@ -230,6 +248,19 @@ void SecretChatManager::EnsureEntryForChat(
 		descriptor.chatId);
 	RefreshChatListEntry(entry.get());
 	_entries.emplace(descriptor.chatId, std::move(entry));
+}
+
+void SecretChatManager::UpsertKnownChat(const SecretChatState &state) {
+	const auto descriptor = DescriptorFromState(state);
+	const auto i = ranges::find(
+		_knownChats,
+		state.chat_id,
+		&SecretChatDescriptor::chatId);
+	if (i == _knownChats.end()) {
+		_knownChats.push_back(descriptor);
+	} else {
+		*i = descriptor;
+	}
 }
 
 auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
@@ -585,13 +616,9 @@ bool SecretChatManager::SaveState(const SecretChatState &state) const {
 	const auto saved = SaveSecretChatState(_session, state);
 	if (saved) {
 		auto that = const_cast<SecretChatManager*>(this);
-		that->RefreshKnownChats();
-		for (const auto &descriptor : that->_knownChats) {
-			if (descriptor.chatId == state.chat_id) {
-				that->EnsureEntryForChat(descriptor);
-				break;
-			}
-		}
+		that->_states[state.chat_id] = state;
+		that->UpsertKnownChat(state);
+		that->EnsureEntryForChat(DescriptorFromState(state));
 	}
 	return saved;
 }
@@ -601,7 +628,10 @@ const QVector<SecretChatDescriptor> &SecretChatManager::KnownChats() const {
 }
 
 std::optional<SecretChatState> SecretChatManager::LoadState(int64_t chatId) const {
-	return LoadSecretChatState(_session, chatId);
+	if (const auto i = _states.find(chatId); i != _states.end()) {
+		return i->second;
+	}
+	return std::nullopt;
 }
 
 SecretChatManager &Manager(not_null<Main::Session*> session) {
@@ -625,13 +655,7 @@ void SecretChatManager::StoreParsedMessage(
 	}
 	AdvanceIncomingState(message);
 	if (const auto state = LoadState(chatId); state.has_value()) {
-		EnsureEntryForChat(SecretChatDescriptor{
-			.chatId = state->chat_id,
-			.accessHash = state->access_hash,
-			.adminId = state->admin_id,
-			.participantId = state->participant_id,
-			.isCreator = state->is_creator,
-		});
+		EnsureEntryForChat(DescriptorFromState(*state));
 	}
 	auto &list = _messages[chatId];
 	list.push_back(std::move(message));
@@ -718,6 +742,7 @@ bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
 
 bool SecretChatManager::DeleteChat(int64_t chatId) {
 	const auto removed = DeleteSecretChat(_session, chatId);
+	_states.erase(chatId);
 	_messages.remove(chatId);
 	_rendered.erase(chatId);
 	if (const auto i = _entries.find(chatId); i != end(_entries)) {
