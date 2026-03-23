@@ -13,6 +13,7 @@
 #include "dialogs/secret_chat_entry.h"
 #include "history/history.h"
 #include "history/history_item.h"
+#include "ui/text/text_entity.h"
 
 #include "base/unixtime.h"
 #include "base/random.h"
@@ -40,6 +41,7 @@ struct SecretChatManager::RenderState {
 	PeerId peerId = 0;
 	not_null<History*> history;
 	std::vector<FullMsgId> ids;
+	std::map<uint64_t, FullMsgId> randomIds;
 };
 
 namespace {
@@ -105,23 +107,88 @@ namespace {
 	};
 }
 
-[[nodiscard]] QString RenderMessageText(const SecretParsedMessage &message) {
-	QString line;
+[[nodiscard]] TextWithEntities RenderMessageText(
+		const SecretParsedMessage &message) {
+	auto result = TextWithEntities();
 	std::visit([&](const auto &value) {
 		using T = std::decay_t<decltype(value)>;
 		if constexpr (std::is_same_v<T, SecretParsedTextMessage>) {
-			line = value.text;
+			result.text = value.text;
+			result.entities.reserve(value.entities.size());
+			for (const auto &entity : value.entities) {
+				if ((entity.offset < 0)
+					|| (entity.length <= 0)
+					|| (entity.offset + entity.length > result.text.size())) {
+					continue;
+				}
+				auto mapped = std::optional<EntityInText>();
+				switch (entity.constructor) {
+				case 0xfa04579d:
+					mapped = EntityInText(EntityType::Mention, entity.offset, entity.length);
+				break;
+				case 0x6f635b0d:
+					mapped = EntityInText(EntityType::Hashtag, entity.offset, entity.length);
+				break;
+				case 0x6cef8ac7:
+					mapped = EntityInText(EntityType::BotCommand, entity.offset, entity.length);
+				break;
+				case 0x6ed02538:
+					mapped = EntityInText(EntityType::Url, entity.offset, entity.length);
+				break;
+				case 0x64e475c2:
+					mapped = EntityInText(EntityType::Email, entity.offset, entity.length);
+				break;
+				case 0xbd610bc9:
+					mapped = EntityInText(EntityType::Bold, entity.offset, entity.length);
+				break;
+				case 0x826f8b60:
+					mapped = EntityInText(EntityType::Italic, entity.offset, entity.length);
+				break;
+				case 0x28a20571:
+					mapped = EntityInText(EntityType::Code, entity.offset, entity.length);
+				break;
+				case 0x73924be0:
+					mapped = EntityInText(EntityType::Pre, entity.offset, entity.length, entity.data);
+				break;
+				case 0x76a6d327:
+					mapped = EntityInText(EntityType::CustomUrl, entity.offset, entity.length, entity.data);
+				break;
+				case 0x9c4e7e8b:
+					mapped = EntityInText(EntityType::Underline, entity.offset, entity.length);
+				break;
+				case 0xbf0693d4:
+					mapped = EntityInText(EntityType::StrikeOut, entity.offset, entity.length);
+				break;
+				case 0x020df5d0:
+					mapped = EntityInText(EntityType::Blockquote, entity.offset, entity.length);
+				break;
+				case 0x32ca960f:
+					mapped = EntityInText(EntityType::Spoiler, entity.offset, entity.length);
+				break;
+				}
+				if (mapped.has_value()) {
+					result.entities.push_back(*mapped);
+				}
+			}
 		} else if constexpr (std::is_same_v<T, SecretParsedServiceMessage>) {
-			line = QString("[service 0x%1]").arg(
-				value.actionConstructor,
-				8,
-				16,
-				QLatin1Char('0'));
+			result.text = QString("[secret chat: %1]").arg(
+				SecretServiceActionName(value.actionConstructor));
 		} else if constexpr (std::is_same_v<T, SecretParsedUnsupportedMessage>) {
-			line = QString("[unsupported %1]").arg(value.description);
+			result.text = QString("[unsupported %1]").arg(value.description);
 		}
 	}, message);
-	return line;
+	return result;
+}
+
+[[nodiscard]] uint64_t MessageRandomId(const SecretParsedMessage &message) {
+	return std::visit([](const auto &value) -> uint64_t {
+		using T = std::decay_t<decltype(value)>;
+		if constexpr (std::is_same_v<T, SecretParsedUnsupportedMessage>) {
+			return 0;
+		} else {
+			return value.randomId;
+		}
+	}, message);
 }
 
 // Serialize a minimal decrypted secret text message body.
@@ -296,11 +363,22 @@ void SecretChatManager::AppendRenderedMessage(
 			: state.peerId,
 		.date = envelope.date ? envelope.date : base::unixtime::now(),
 	};
+	if (const auto text = std::get_if<SecretParsedTextMessage>(&message);
+		text && text->replyToRandomId) {
+		const auto i = state.randomIds.find(text->replyToRandomId);
+		if (i != end(state.randomIds)) {
+			fields.flags |= MessageFlag::HasReplyInfo;
+			fields.replyTo = FullReplyTo{ i->second };
+		}
+	}
 	const auto item = state.history->addNewLocalMessage(
 		std::move(fields),
-		TextWithEntities{ .text = RenderMessageText(message) },
+		RenderMessageText(message),
 		MTP_messageMediaEmpty());
 	state.ids.push_back(item->fullId());
+	if (const auto randomId = MessageRandomId(message)) {
+		state.randomIds.emplace(randomId, item->fullId());
+	}
 	_session->changes().messageUpdated(
 		item,
 		Data::MessageUpdate::Flag::NewAdded);
