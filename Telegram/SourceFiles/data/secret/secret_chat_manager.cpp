@@ -311,6 +311,7 @@ void SecretChatManager::RefreshChatListEntry(
 void SecretChatManager::RefreshPresentation(int64_t chatId) {
 	if (const auto i = _entries.find(chatId); i != end(_entries)) {
 		RefreshChatListEntry(i->second.get());
+		i->second->updateChatListEntry();
 	}
 	_presentationUpdates.fire_copy(chatId);
 }
@@ -814,7 +815,6 @@ QString SecretChatManager::DisplayStatusForChat(int64_t chatId) const {
 	}
 	return QString("Secret chat");
 }
-
 void SecretChatManager::HandleEncryptedTyping(int64_t chatId) {
 	auto &timer = _typingTimers[chatId];
 	if (!timer) {

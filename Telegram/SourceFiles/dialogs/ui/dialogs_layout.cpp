@@ -825,7 +825,7 @@ void PaintRow(
 			rectForName.top(),
 			context.width,
 			text);
-	} else if (from) {
+	} else if (from && !entry->asSecretChat()) {
 		if ((history || sublist) && !context.search) {
 			paintPeerBadge(rowName.maxWidth());
 		}
