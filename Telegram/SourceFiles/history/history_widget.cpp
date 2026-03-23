@@ -2500,9 +2500,7 @@ void HistoryWidget::showHistory(
 				}
 				return;
 			}
-			if (!IsServerMsgId(showAtMsgId)
-				&& !IsClientMsgId(showAtMsgId)
-				&& !IsServerMsgId(-showAtMsgId)) {
+			if (!isResolvableShowAtMessage(showAtMsgId)) {
 				// To end or to unread.
 				destroyUnreadBar();
 			}
@@ -6985,10 +6983,7 @@ bool HistoryWidget::hasSavedScroll() const {
 int HistoryWidget::countInitialScrollTop() {
 	if (hasSavedScroll()) {
 		return _list->historyScrollTop();
-	} else if (_showAtMsgId
-		&& (IsServerMsgId(_showAtMsgId)
-			|| IsClientMsgId(_showAtMsgId)
-			|| IsServerMsgId(-_showAtMsgId))) {
+	} else if (isResolvableShowAtMessage(_showAtMsgId)) {
 		const auto item = getItemFromHistoryOrMigrated(_showAtMsgId);
 		const auto itemTop = _list->itemTop(item);
 		if (itemTop < 0) {
@@ -9453,6 +9448,14 @@ HistoryItem *HistoryWidget::getItemFromHistoryOrMigrated(
 		: _peer
 		? session().data().message(_peer, genericMsgId)
 		: nullptr;
+}
+
+bool HistoryWidget::isResolvableShowAtMessage(MsgId msgId) const {
+	return msgId
+		&& (IsServerMsgId(msgId)
+			|| IsClientMsgId(msgId)
+			|| IsServerMsgId(-msgId)
+			|| getItemFromHistoryOrMigrated(msgId));
 }
 
 MessageIdsList HistoryWidget::getSelectedItems() const {

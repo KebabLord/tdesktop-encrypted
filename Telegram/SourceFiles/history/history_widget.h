@@ -648,6 +648,7 @@ private:
 	void setHistory(History *history);
 	void setEditMsgId(MsgId msgId);
 
+	[[nodiscard]] bool isResolvableShowAtMessage(MsgId msgId) const;
 	HistoryItem *getItemFromHistoryOrMigrated(MsgId genericMsgId) const;
 	void animatedScrollToItem(MsgId msgId);
 	void animatedScrollToY(int scrollTo, HistoryItem *attachTo = nullptr);
