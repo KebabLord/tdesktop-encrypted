@@ -4913,7 +4913,14 @@ bool HistoryWidget::sendSecretText(Api::SendOptions options) {
 		return true;
 	}
 
-	const auto text = _field->getTextWithAppliedMarkdown().text;
+	const auto textWithTags = _field->getTextWithAppliedMarkdown();
+	const auto prepareFlags = Ui::ItemTextOptions(
+		_history,
+		session().user()).flags;
+	auto text = TextWithEntities{
+		textWithTags.text,
+		TextUtilities::ConvertTextTagsToEntities(textWithTags.tags) };
+	TextUtilities::PrepareForSending(text, prepareFlags);
 	if (!Data::SecretChats::Manager(&session()).SendText(*chatId, text)) {
 		return true;
 	}

@@ -5,6 +5,7 @@
 #include "data/secret/secret_chat_types.h"
 #include "rpl/event_stream.h"
 #include "rpl/lifetime.h"
+#include "ui/text/text_entity.h"
 
 #include <QMap>
 #include <QVector>
@@ -59,7 +60,9 @@ public:
 	[[nodiscard]] std::optional<int64_t> ChatIdForPeer(PeerId peerId) const;
 	[[nodiscard]] rpl::producer<int64_t> messageUpdates() const;
 	[[nodiscard]] rpl::producer<int64_t> presentationUpdates() const;
-	[[nodiscard]] bool SendText(int64_t chatId, const QString &text);
+	[[nodiscard]] bool SendText(
+		int64_t chatId,
+		const ::TextWithEntities &textWithEntities);
 	[[nodiscard]] bool DeleteChat(int64_t chatId);
 	[[nodiscard]] UserData *DisplayUserForChat(int64_t chatId) const;
 	[[nodiscard]] QString DisplayNameForChat(int64_t chatId) const;

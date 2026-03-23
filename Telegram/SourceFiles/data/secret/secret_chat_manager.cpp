@@ -191,11 +191,109 @@ namespace {
 	}, message);
 }
 
-// Serialize a minimal decrypted secret text message body.
+[[nodiscard]] std::optional<SecretParsedEntity> SecretEntityFromTextEntity(
+		const EntityInText &entity) {
+	auto result = SecretParsedEntity{
+		.offset = entity.offset(),
+		.length = entity.length(),
+		.data = entity.data(),
+	};
+	switch (entity.type()) {
+	case EntityType::Mention:
+		result.constructor = 0xfa04579d;
+	break;
+	case EntityType::Hashtag:
+		result.constructor = 0x6f635b0d;
+	break;
+	case EntityType::BotCommand:
+		result.constructor = 0x6cef8ac7;
+	break;
+	case EntityType::Url:
+		result.constructor = 0x6ed02538;
+	break;
+	case EntityType::Email:
+		result.constructor = 0x64e475c2;
+	break;
+	case EntityType::Bold:
+		result.constructor = 0xbd610bc9;
+	break;
+	case EntityType::Italic:
+		result.constructor = 0x826f8b60;
+	break;
+	case EntityType::Code:
+		result.constructor = 0x28a20571;
+	break;
+	case EntityType::Pre:
+		result.constructor = 0x73924be0;
+	break;
+	case EntityType::CustomUrl:
+		result.constructor = 0x76a6d327;
+	break;
+	case EntityType::Underline:
+		result.constructor = 0x9c4e7e8b;
+	break;
+	case EntityType::StrikeOut:
+		result.constructor = 0xbf0693d4;
+	break;
+	case EntityType::Blockquote:
+		result.constructor = 0x020df5d0;
+	break;
+	case EntityType::Spoiler:
+		result.constructor = 0x32ca960f;
+	break;
+	default:
+		return std::nullopt;
+	}
+	if ((result.offset < 0) || (result.length <= 0)) {
+		return std::nullopt;
+	}
+	return result;
+}
+
+[[nodiscard]] QVector<SecretParsedEntity> SecretEntitiesFromText(
+		const TextWithEntities &textWithEntities) {
+	auto result = QVector<SecretParsedEntity>();
+	result.reserve(textWithEntities.entities.size());
+	for (const auto &entity : textWithEntities.entities) {
+		const auto mapped = SecretEntityFromTextEntity(entity);
+		if (!mapped.has_value()) {
+			continue;
+		}
+		if (mapped->offset + mapped->length > textWithEntities.text.size()) {
+			continue;
+		}
+		result.push_back(*mapped);
+	}
+	return result;
+}
+
+void AppendSecretMessageEntities(
+		QByteArray &body,
+		const QVector<SecretParsedEntity> &entities) {
+	AppendUInt32(body, kTlVectorConstructor);
+	AppendInt32(body, entities.size());
+	for (const auto &entity : entities) {
+		AppendUInt32(body, entity.constructor);
+		AppendInt32(body, entity.offset);
+		AppendInt32(body, entity.length);
+		switch (entity.constructor) {
+		case 0x73924be0:
+		case 0x76a6d327:
+			AppendTLString(body, entity.data);
+		break;
+		case 0xc8cf05f8:
+			AppendUInt64(body, entity.data.toULongLong());
+		break;
+		}
+	}
+}
+
 [[nodiscard]] QByteArray SerializeSecretTextBody(
 		const SecretChatState &state,
 		uint64_t randomId,
-		const QString &text) {
+		const TextWithEntities &textWithEntities,
+		uint32_t flags,
+		const QVector<SecretParsedEntity> &entities) {
 	auto body = QByteArray();
 	AppendUInt32(body, kSecretOuterLayerConstructor);
 
@@ -208,10 +306,13 @@ namespace {
 	AppendInt32(body, SecretInSeqNo(state, state.incoming_sequence));
 	AppendInt32(body, SecretOutSeqNo(state, state.outgoing_sequence));
 	AppendUInt32(body, kSecretInnerMessageV73);
-	AppendUInt32(body, 0);
+	AppendUInt32(body, flags);
 	AppendUInt64(body, randomId);
 	AppendInt32(body, 0);
-	AppendTLString(body, text);
+	AppendTLString(body, textWithEntities.text);
+	if (!entities.isEmpty()) {
+		AppendSecretMessageEntities(body, entities);
+	}
 	return body;
 }
 
@@ -764,9 +865,10 @@ void SecretChatManager::StoreParsedMessage(
 	_messageUpdates.fire_copy(chatId);
 }
 
-// Encrypt and send a plain-text secret message through messages.sendEncrypted.
-bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
-	if (text.trimmed().isEmpty()) {
+bool SecretChatManager::SendText(
+		int64_t chatId,
+		const ::TextWithEntities &textWithEntities) {
+	if (textWithEntities.text.trimmed().isEmpty()) {
 		return false;
 	}
 	auto state = LoadState(chatId);
@@ -777,7 +879,14 @@ bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
 	}
 
 	const auto randomId = base::RandomValue<uint64>();
-	const auto body = SerializeSecretTextBody(*state, randomId, text);
+	const auto entities = SecretEntitiesFromText(textWithEntities);
+	const auto flags = uint32_t(entities.isEmpty() ? 0 : (1 << 7));
+	const auto body = SerializeSecretTextBody(
+		*state,
+		randomId,
+		textWithEntities,
+		flags,
+		entities);
 	const auto payload = EncryptSecretChatPayloadMtproto2(*state, body);
 	if (!payload.has_value()) {
 		LOG(("1338 SecretChat: send encryption failed chat_id=%1 random_id=%2")
@@ -792,7 +901,7 @@ bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
 	LOG(("1338 SecretChat: sending encrypted text chat_id=%1 random_id=%2 text=%3 out_seq=%4")
 		.arg(chatId)
 		.arg(FormatUint64(randomId))
-		.arg(text)
+		.arg(textWithEntities.text)
 		.arg(state->outgoing_sequence));
 
 	_session->api().request(MTPmessages_SendEncrypted(
@@ -812,7 +921,9 @@ bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
 				.outgoing = true,
 			},
 			.randomId = randomId,
-			.text = text,
+			.flags = flags,
+			.text = textWithEntities.text,
+			.entities = entities,
 		};
 		result.match([&](const MTPDmessages_sentEncryptedMessage &data) {
 			message.envelope.date = data.vdate().v;
