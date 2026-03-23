@@ -5,6 +5,7 @@
 #include "chat_helpers/message_field.h"
 #include "history/history.h"
 #include "history/history_item.h"
+#include "main/main_session.h"
 #include "ui/chat/chat_theme.h"
 #include "ui/controls/send_button.h"
 #include "ui/painter.h"
@@ -19,6 +20,7 @@
 #include "styles/style_settings.h"
 
 #include "rpl/filter.h"
+#include "rpl/lifetime.h"
 
 #include <algorithm>
 #include <lang_auto.h>
@@ -30,6 +32,44 @@ namespace {
 const auto kSecretChatNameColor = QColor(0x4E, 0xAD, 0x41);
 constexpr auto kSecretChatIconOffset = QPoint(-3, -2);
 constexpr auto kSecretChatIconTextSkip = 0;
+
+[[nodiscard]] rpl::producer<QString> SecretChatNameValue(
+		not_null<Main::Session*> session,
+		int64_t chatId) {
+	return [=](auto consumer) {
+		auto lifetime = rpl::lifetime();
+		const auto push = [=] {
+			consumer.put_next(Data::SecretChats::Manager(session).DisplayNameForChat(chatId));
+		};
+		push();
+		Data::SecretChats::Manager(session).presentationUpdates(
+		) | rpl::filter([=](int64_t updatedChatId) {
+			return updatedChatId == chatId;
+		}) | rpl::on_next([=](int64_t) {
+			push();
+		}, lifetime);
+		return lifetime;
+	};
+}
+
+[[nodiscard]] rpl::producer<QString> SecretChatStatusValue(
+		not_null<Main::Session*> session,
+		int64_t chatId) {
+	return [=](auto consumer) {
+		auto lifetime = rpl::lifetime();
+		const auto push = [=] {
+			consumer.put_next(Data::SecretChats::Manager(session).DisplayStatusForChat(chatId));
+		};
+		push();
+		Data::SecretChats::Manager(session).presentationUpdates(
+		) | rpl::filter([=](int64_t updatedChatId) {
+			return updatedChatId == chatId;
+		}) | rpl::on_next([=](int64_t) {
+			push();
+		}, lifetime);
+		return lifetime;
+	};
+}
 
 void PaintTintedIcon(
 		Painter &p,
@@ -81,11 +121,11 @@ SecretChatWidget::SecretChatWidget(
 , _theme(Window::Theme::DefaultChatThemeOn(lifetime()))
 , _title(std::make_unique<Ui::FlatLabel>(
 		this,
-		rpl::single(Data::SecretChats::Manager(&session()).DisplayNameForChat(chatId)),
+		SecretChatNameValue(&session(), chatId),
 		st::previewName))
 , _status(std::make_unique<Ui::FlatLabel>(
 		this,
-		rpl::single(Data::SecretChats::Manager(&session()).DisplayStatusForChat(chatId)),
+		SecretChatStatusValue(&session(), chatId),
 		st::previewStatus))
 , _scroll(std::make_unique<Ui::ElasticScroll>(this))
 , _field(object_ptr<Ui::InputField>(
@@ -292,6 +332,11 @@ void SecretChatWidget::listSelectionChanged(SelectedItems &&items) {
 }
 
 void SecretChatWidget::listMarkReadTill(not_null<HistoryItem*> item) {
+	if (item->out()) {
+		return;
+	}
+	_history->inboxRead(item);
+	Data::SecretChats::Manager(&session()).MarkReadTill(_chatId, item->date());
 }
 
 void SecretChatWidget::listMarkContentsRead(
@@ -316,7 +361,7 @@ bool SecretChatWidget::listElementHideReply(not_null<const Element*> view) {
 }
 
 bool SecretChatWidget::listElementShownUnread(not_null<const Element*> view) {
-	return false;
+	return view->data()->unread(view->data()->history());
 }
 
 bool SecretChatWidget::listIsGoodForAroundPosition(not_null<const Element*> view) {

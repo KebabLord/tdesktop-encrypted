@@ -49,6 +49,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_dialogs.h"
 #include "styles/style_widgets.h"
 #include "styles/style_window.h"
+#include "data/secret/secret_chat_manager.h"
+#include "dialogs/secret_chat_entry.h"
 
 namespace Dialogs::Ui {
 namespace {
@@ -493,6 +495,16 @@ void PaintRow(
 			? tr::lng_badge_psa_default(tr::now)
 			: custom;
 		PaintRowTopRight(p, text, rectForName, context);
+	} else if (entry->asSecretChat()) {
+		PaintTintedIcon(
+			p,
+			st::dialogsUnlockIcon,
+			rectForName.topLeft() + kSecretChatIconOffset,
+			kSecretChatNameColor);
+		rectForName.setLeft(rectForName.left()
+			+ kSecretChatIconOffset.x()
+			+ st::dialogsUnlockIcon.width()
+			+ kSecretChatIconTextSkip);
 	} else if (verifyInfo) {
 		if (!rowBadge.ready(verifyInfo)) {
 			rowBadge.set(
@@ -511,16 +523,6 @@ void PaintRow(
 				+ chatTypeIcon->width()
 				+ st::dialogsChatTypeSkip);
 		}
-	} else if (entry->asSecretChat()) {
-		PaintTintedIcon(
-			p,
-			st::dialogsUnlockIcon,
-			rectForName.topLeft() + kSecretChatIconOffset,
-			kSecretChatNameColor);
-		rectForName.setLeft(rectForName.left()
-			+ kSecretChatIconOffset.x()
-			+ st::dialogsUnlockIcon.width()
-			+ kSecretChatIconTextSkip);
 	}
 	auto texttop = context.st->textTop;
 	if (const auto folder = entry->asFolder()) {
@@ -1035,6 +1037,7 @@ void RowPainter::Paint(
 	const auto displayPinnedIcon = badgesState.empty()
 		&& entry->isPinnedDialog(context.filter)
 		&& (context.filter || !entry->fixedOnTopIndex());
+	const auto secret = entry->asSecretChat();
 
 	const auto from = history
 		? (history->peer->migrateTo()
@@ -1042,6 +1045,9 @@ void RowPainter::Paint(
 			: history->peer.get())
 		: sublist
 		? sublist->sublistPeer().get()
+		: secret
+		? Data::SecretChats::Manager(&entry->session()).DisplayUserForChat(
+			secret->chatId())
 		: nullptr;
 	const auto allowUserOnline = true;// !context.narrow || badgesState.empty();
 	const auto flags = (allowUserOnline ? Flag::AllowUserOnline : Flag(0))

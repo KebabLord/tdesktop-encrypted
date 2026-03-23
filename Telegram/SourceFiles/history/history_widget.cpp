@@ -82,6 +82,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_chat_filters.h"
 #include "data/data_file_origin.h"
 #include "data/data_histories.h"
+#include "data/secret/secret_chat_manager.h"
 #include "data/data_group_call.h"
 #include "data/data_message_reactions.h"
 #include "data/data_peer_values.h" // Data::AmPremiumValue.
@@ -1092,12 +1093,29 @@ void HistoryWidget::setGeometryWithTopMoved(
 }
 
 Dialogs::EntryState HistoryWidget::computeDialogsEntryState() const {
+	if (const auto chatId = shownSecretChatId()) {
+		if (const auto entry = Data::SecretChats::Manager(&session())
+				.EntryForChat(*chatId)) {
+			return Dialogs::EntryState{
+				.key = entry,
+				.section = Dialogs::EntryState::Section::History,
+				.currentReplyTo = replyTo(),
+				.currentSuggest = suggestOptions(),
+			};
+		}
+	}
 	return Dialogs::EntryState{
 		.key = _history,
 		.section = Dialogs::EntryState::Section::History,
 		.currentReplyTo = replyTo(),
 		.currentSuggest = suggestOptions(),
 	};
+}
+
+std::optional<int64_t> HistoryWidget::shownSecretChatId() const {
+	return _history
+		? Data::SecretChats::Manager(&session()).ChatIdForHistory(_history)
+		: std::nullopt;
 }
 
 void HistoryWidget::refreshJoinChannelText() {
@@ -1892,6 +1910,7 @@ void HistoryWidget::fieldChanged() {
 	InvokeQueued(this, [=] {
 		updateInlineBotQuery();
 		if (_history
+			&& !shownSecretChatId()
 			&& !_inlineBot
 			&& !_editMsgId
 			&& (!_autocomplete || !_autocomplete->stickersEmoji())
@@ -3803,6 +3822,7 @@ void HistoryWidget::newItemAdded(not_null<HistoryItem*> item) {
 			if (item->isUnreadMention() && !item->isUnreadMedia()) {
 				session().api().markContentsRead(item);
 			}
+			markSecretMessageRead(item);
 			session().data().histories().readInboxOnNewMessage(item);
 
 			// Also clear possible scheduled messages notifications.
@@ -3843,6 +3863,14 @@ void HistoryWidget::maybeMarkReactionsRead(not_null<HistoryItem*> item) {
 		return;
 	}
 	session().api().markContentsRead(item);
+}
+
+void HistoryWidget::markSecretMessageRead(not_null<HistoryItem*> item) {
+	const auto chatId = shownSecretChatId();
+	if (!chatId || item->out()) {
+		return;
+	}
+	Data::SecretChats::Manager(&session()).MarkReadTill(*chatId, item->date());
 }
 
 void HistoryWidget::unreadCountUpdated() {
@@ -4791,6 +4819,8 @@ void HistoryWidget::sendVoice(const VoiceToSend &data) {
 void HistoryWidget::send(Api::SendOptions options) {
 	if (!_history) {
 		return;
+	} else if (sendSecretText(options)) {
+		return;
 	} else if (_editMsgId) {
 		saveEditMessage({});
 		return;
@@ -4863,6 +4893,46 @@ void HistoryWidget::send(Api::SendOptions options) {
 
 void HistoryWidget::sendWithModifiers(Qt::KeyboardModifiers modifiers) {
 	send({ .handleSupportSwitch = Support::HandleSwitch(modifiers) });
+}
+
+bool HistoryWidget::sendSecretText(Api::SendOptions options) {
+	const auto chatId = shownSecretChatId();
+	if (!chatId) {
+		return false;
+	}
+	if (_editMsgId
+		|| _replyTo
+		|| readyToForward()
+		|| _kbReplyTo
+		|| options.scheduled
+		|| !_preview->draft().url.isEmpty()) {
+		controller()->showToast(
+			u"Secret chats currently support plain text sending only."_q);
+		return true;
+	} else if (!HasSendText(_field)) {
+		return true;
+	}
+
+	const auto text = _field->getTextWithAppliedMarkdown().text;
+	if (!Data::SecretChats::Manager(&session()).SendText(*chatId, text)) {
+		return true;
+	}
+
+	clearFieldText();
+	if (_preview) {
+		_preview->apply({ .removed = true });
+	}
+	saveDraftWithTextNow();
+	hideSelectorControlsAnimated();
+	setInnerFocus();
+
+	if (!_keyboard->hasMarkup() && _keyboard->forceReply() && !_kbReplyTo) {
+		toggleKeyboard();
+	}
+	session().changes().historyUpdated(
+		_history,
+		Data::HistoryUpdate::Flag::MessageSent);
+	return true;
 }
 
 void HistoryWidget::sendScheduled(Api::SendOptions initialOptions) {
@@ -9232,6 +9302,12 @@ void HistoryWidget::handlePeerUpdate() {
 }
 
 bool HistoryWidget::updateCanSendMessage() {
+	if (shownSecretChatId()) {
+		const auto changed = !_canSendMessages || !_canSendTexts;
+		_canSendMessages = true;
+		_canSendTexts = true;
+		return changed;
+	}
 	if (!_peer) {
 		return false;
 	}

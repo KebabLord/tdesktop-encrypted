@@ -5,6 +5,7 @@
 #include "data/secret/secret_chat_tl.h"
 #include "data/secret/secret_chat_types.h"
 #include "data/data_peer.h"
+#include "data/data_changes.h"
 #include "data/data_peer_values.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
@@ -15,6 +16,7 @@
 
 #include "base/unixtime.h"
 #include "base/random.h"
+#include "base/timer.h"
 #include "logs.h"
 #include "main/main_session.h"
 #include "mtproto/mtproto_dh_utils.h"
@@ -22,9 +24,17 @@
 
 #include "base/openssl_help.h"
 
+#include <lang_auto.h>
+
 #include <map>
 
 namespace Data::SecretChats {
+
+namespace {
+
+constexpr auto kSecretTypingTimeout = 6 * crl::time(1000);
+
+} // namespace
 
 struct SecretChatManager::RenderState {
 	PeerId peerId = 0;
@@ -163,6 +173,25 @@ SecretChatManager::SecretChatManager(not_null<Main::Session*> session)
 : _session(session) {
 	RefreshKnownChats();
 	RestoreMessagesFromStorage();
+	_session->changes().peerUpdates(
+		Data::PeerUpdate::Flag::Name
+		| Data::PeerUpdate::Flag::Username
+		| Data::PeerUpdate::Flag::Usernames
+		| Data::PeerUpdate::Flag::PhoneNumber
+		| Data::PeerUpdate::Flag::Photo
+		| Data::PeerUpdate::Flag::OnlineStatus
+	) | rpl::on_next([=](const Data::PeerUpdate &update) {
+		const auto user = update.peer->asUser();
+		if (!user) {
+			return;
+		}
+		for (const auto &[chatId, entry] : _entries) {
+			if (DisplayUserForChat(chatId) != user) {
+				continue;
+			}
+			RefreshPresentation(chatId);
+		}
+	}, _lifetime);
 	// Chat-list entry creation is deferred until after Manager() inserts this
 	// instance into the static map, otherwise entry refresh can re-enter
 	// Manager() during construction and recurse indefinitely.
@@ -212,6 +241,7 @@ auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
 		.peerId = peerId,
 		.history = _session->data().history(peerId),
 	});
+	state->history->getReadyFor(ShowAtTheEndMsgId);
 	if (const auto i = _messages.find(chatId); i != _messages.end()) {
 		for (const auto &message : i.value()) {
 			AppendRenderedMessage(*state, message);
@@ -228,8 +258,7 @@ void SecretChatManager::AppendRenderedMessage(
 	const auto &envelope = MessageEnvelope(message);
 	auto fields = HistoryItemCommonFields{
 		.id = state.history->nextNonHistoryEntryId(),
-		.flags = (MessageFlag::FakeHistoryItem
-			| MessageFlag::HasFromId
+		.flags = (MessageFlag::HasFromId
 			| (envelope.outgoing ? MessageFlag::Outgoing : MessageFlag())),
 		.from = envelope.outgoing
 			? _session->userPeerId()
@@ -241,6 +270,12 @@ void SecretChatManager::AppendRenderedMessage(
 		TextWithEntities{ .text = RenderMessageText(message) },
 		MTP_messageMediaEmpty());
 	state.ids.push_back(item->fullId());
+	_session->changes().messageUpdated(
+		item,
+		Data::MessageUpdate::Flag::NewAdded);
+	_session->changes().historyUpdated(
+		state.history,
+		Data::HistoryUpdate::Flag::ClientSideMessages);
 }
 
 // Update the persisted incoming sequence counters from an inbound message.
@@ -271,6 +306,19 @@ void SecretChatManager::RefreshChatListEntry(
 		not_null<Dialogs::SecretChatEntry*> entry) {
 	_session->data().refreshChatListEntry(
 		Dialogs::Key(static_cast<Dialogs::Entry*>(entry.get())));
+}
+
+void SecretChatManager::RefreshPresentation(int64_t chatId) {
+	if (const auto i = _entries.find(chatId); i != end(_entries)) {
+		RefreshChatListEntry(i->second.get());
+	}
+	_presentationUpdates.fire_copy(chatId);
+}
+
+void SecretChatManager::ClearTyping(int64_t chatId) {
+	if (_typingUntil.erase(chatId) > 0) {
+		RefreshPresentation(chatId);
+	}
 }
 
 void SecretChatManager::HandleEncryptedMessage(
@@ -571,6 +619,9 @@ SecretChatManager &Manager(not_null<Main::Session*> session) {
 void SecretChatManager::StoreParsedMessage(
 		int64_t chatId,
 		SecretParsedMessage message) {
+	if (!MessageEnvelope(message).outgoing) {
+		ClearTyping(chatId);
+	}
 	AdvanceIncomingState(message);
 	if (const auto state = LoadState(chatId); state.has_value()) {
 		EnsureEntryForChat(SecretChatDescriptor{
@@ -705,8 +756,31 @@ const std::vector<FullMsgId> &SecretChatManager::ViewMessageIds(int64_t chatId) 
 	return EnsureRenderState(chatId).ids;
 }
 
+std::optional<int64_t> SecretChatManager::ChatIdForHistory(
+		not_null<const History*> history) const {
+	for (const auto &[chatId, render] : _rendered) {
+		if (render->history == history) {
+			return chatId;
+		}
+	}
+	return std::nullopt;
+}
+
+std::optional<int64_t> SecretChatManager::ChatIdForPeer(PeerId peerId) const {
+	for (const auto &[chatId, render] : _rendered) {
+		if (render->peerId == peerId) {
+			return chatId;
+		}
+	}
+	return std::nullopt;
+}
+
 rpl::producer<int64_t> SecretChatManager::messageUpdates() const {
 	return _messageUpdates.events();
+}
+
+rpl::producer<int64_t> SecretChatManager::presentationUpdates() const {
+	return _presentationUpdates.events();
 }
 
 UserData *SecretChatManager::DisplayUserForChat(int64_t chatId) const {
@@ -728,18 +802,101 @@ QString SecretChatManager::DisplayNameForChat(int64_t chatId) const {
 }
 
 QString SecretChatManager::DisplayStatusForChat(int64_t chatId) const {
+	if (const auto i = _typingUntil.find(chatId); (i != end(_typingUntil)) && (i->second > crl::now())) {
+		return tr::lng_typing(tr::now);
+	}
 	if (const auto user = DisplayUserForChat(chatId)) {
-		if (Data::IsUserOnline(user, base::unixtime::now())) {
-			return QString("online");
+		const auto now = base::unixtime::now();
+		if (Data::IsUserOnline(user, now)) {
+			_session->data().watchForOffline(user, now);
 		}
-		if (const auto username = user->username(); !username.isEmpty()) {
-			return '@' + username;
-		}
-		if (!user->phone().isEmpty()) {
-			return '+' + user->phone();
-		}
+		return Data::OnlineText(user, now);
 	}
 	return QString("Secret chat");
+}
+
+void SecretChatManager::HandleEncryptedTyping(int64_t chatId) {
+	auto &timer = _typingTimers[chatId];
+	if (!timer) {
+		timer = std::make_unique<base::Timer>();
+		timer->setCallback([=, this] {
+			const auto i = _typingUntil.find(chatId);
+			if ((i == end(_typingUntil)) || (i->second <= crl::now())) {
+				ClearTyping(chatId);
+				return;
+			}
+			if (const auto j = _typingTimers.find(chatId); j != end(_typingTimers)) {
+				j->second->callOnce(std::max(i->second - crl::now(), crl::time(1)));
+			}
+		});
+	}
+	_typingUntil[chatId] = crl::now() + kSecretTypingTimeout;
+	timer->callOnce(kSecretTypingTimeout);
+	LOG(("1336 SecretChat: typing active chat_id=%1 timeout_ms=%2")
+		.arg(chatId)
+		.arg(kSecretTypingTimeout));
+	RefreshPresentation(chatId);
+}
+
+void SecretChatManager::HandleEncryptedMessagesRead(int64_t chatId, TimeId maxDate) {
+	if (!maxDate) {
+		return;
+	}
+	auto &render = EnsureRenderState(chatId);
+	const auto &messages = Messages(chatId);
+	const auto limit = std::min(size_t(messages.size()), render.ids.size());
+	auto upTo = MsgId();
+	for (auto i = size_t(0); i != limit; ++i) {
+		const auto &message = messages[int(i)];
+		const auto &envelope = MessageEnvelope(message);
+		if (!envelope.outgoing || !envelope.date || (envelope.date > maxDate)) {
+			continue;
+		}
+		upTo = render.ids[i].msg;
+	}
+	if (!upTo) {
+		LOG(("1338 SecretChat: read update had no matching outgoing message chat_id=%1 max_date=%2")
+			.arg(chatId)
+			.arg(maxDate));
+		return;
+	}
+	render.history->outboxRead(upTo);
+	LOG(("1338 SecretChat: marked outgoing read chat_id=%1 max_date=%2 msg_id=%3")
+		.arg(chatId)
+		.arg(maxDate)
+		.arg(upTo.bare));
+}
+
+void SecretChatManager::MarkReadTill(int64_t chatId, TimeId maxDate) {
+	if (!maxDate) {
+		return;
+	}
+	if (const auto i = _readTillSent.find(chatId); (i != end(_readTillSent)) && (i->second >= maxDate)) {
+		return;
+	}
+	const auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		return;
+	}
+	_readTillSent[chatId] = maxDate;
+	LOG(("1338 SecretChat: sending readEncryptedHistory chat_id=%1 max_date=%2")
+		.arg(chatId)
+		.arg(maxDate));
+	_session->api().request(MTPmessages_ReadEncryptedHistory(
+		MTP_inputEncryptedChat(
+			MTP_int(chatId),
+			MTP_long(state->access_hash)),
+		MTP_int(maxDate)
+	)).done([=](const MTPBool &) {
+		LOG(("1338 SecretChat: readEncryptedHistory done chat_id=%1 max_date=%2")
+			.arg(chatId)
+			.arg(maxDate));
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1338 SecretChat: readEncryptedHistory failed chat_id=%1 max_date=%2 error=%3")
+			.arg(chatId)
+			.arg(maxDate)
+			.arg(error.type()));
+	}).send();
 }
 
 } // namespace Data::SecretChats
