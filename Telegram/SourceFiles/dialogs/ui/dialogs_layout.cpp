@@ -864,22 +864,11 @@ void PaintRow(
 					? st::dialogsNameFgOver
 					: st::dialogsNameFg));
 		}
-		if (entry->asSecretChat()) {
-			const auto text = st::semiboldFont->elided(
-				entry->chatListName(),
-				rectForName.width());
-			p.drawTextLeft(
-				rectForName.left(),
-				rectForName.top(),
-				context.width,
-				text);
-		} else {
-			rowName.draw(p, {
-				.position = rectForName.topLeft(),
-				.availableWidth = rectForName.width(),
-				.elisionLines = 1,
-			});
-		}
+		rowName.draw(p, {
+			.position = rectForName.topLeft(),
+			.availableWidth = rectForName.width(),
+			.elisionLines = 1,
+		});
 	}
 
 	if (const auto tags = context.chatsFilterTags) {
