@@ -1,6 +1,7 @@
 #pragma once
 
 #include "base/timer.h"
+#include "data/data_types.h"
 #include "data/secret/secret_chat_state.h"
 #include "data/secret/secret_chat_types.h"
 #include "rpl/event_stream.h"
@@ -65,6 +66,15 @@ public:
 		int64_t chatId,
 		const ::TextWithEntities &textWithEntities,
 		const FullReplyTo &replyTo = FullReplyTo());
+	[[nodiscard]] bool DeleteMessages(
+		int64_t chatId,
+		const MessageIdsList &ids);
+	[[nodiscard]] bool SendClearHistory(
+		int64_t chatId,
+		Fn<void(bool)> done = nullptr);
+	[[nodiscard]] bool DiscardChatRemotely(
+		int64_t chatId,
+		Fn<void(bool)> done = nullptr);
 	[[nodiscard]] bool DeleteChat(int64_t chatId);
 	[[nodiscard]] UserData *DisplayUserForChat(int64_t chatId) const;
 	[[nodiscard]] QString DisplayNameForChat(int64_t chatId) const;
@@ -103,6 +113,11 @@ private:
 	void RefreshChatListEntry(not_null<Dialogs::SecretChatEntry*> entry);
 	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);
 	bool ApplyServiceAction(const SecretParsedServiceMessage &message);
+	[[nodiscard]] bool SendServiceMessage(
+		int64_t chatId,
+		uint32_t actionConstructor,
+		QVector<uint64_t> actionRandomIds,
+		Fn<void(SecretParsedServiceMessage)> done = nullptr);
 	int RemoveMessagesByRandomIds(int64_t chatId, const QVector<uint64_t> &randomIds);
 	bool ClearHistory(int64_t chatId);
 	void RefreshKnownChats();

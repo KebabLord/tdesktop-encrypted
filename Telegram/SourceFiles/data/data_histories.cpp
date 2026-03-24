@@ -971,12 +971,14 @@ void Histories::deleteMessages(const MessageIdsList &ids, bool revoke) {
 	auto remove = std::vector<not_null<HistoryItem*>>();
 	remove.reserve(ids.size());
 	base::flat_map<not_null<History*>, QVector<MTPint>> idsByPeer;
+	base::flat_map<int64_t, MessageIdsList> idsBySecretChat;
 	base::flat_map<not_null<PeerData*>, QVector<MTPint>> scheduledIdsByPeer;
 	base::flat_map<BusinessShortcutId, QVector<MTPint>> quickIdsByShortcut;
 	base::flat_set<not_null<DocumentData*>> savedMusic;
 	for (const auto &itemId : ids) {
 		if (const auto item = _owner->message(itemId)) {
 			const auto history = item->history();
+			auto &secretManager = SecretChats::Manager(&history->session());
 			if (item->isSavedMusicItem()) {
 				savedMusic.emplace(item->media()->document());
 				continue;
@@ -1001,6 +1003,9 @@ void Histories::deleteMessages(const MessageIdsList &ids, bool revoke) {
 					_owner->shortcutMessages().removeSending(item);
 				}
 				continue;
+			} else if (const auto chatId = secretManager.ChatIdForHistory(history)) {
+				idsBySecretChat[*chatId].push_back(itemId);
+				continue;
 			}
 			remove.push_back(item);
 			if (item->isRegular()) {
@@ -1011,6 +1016,12 @@ void Histories::deleteMessages(const MessageIdsList &ids, bool revoke) {
 
 	for (const auto &[history, ids] : idsByPeer) {
 		history->owner().histories().deleteMessages(history, ids, revoke);
+	}
+	for (const auto &[chatId, ids] : idsBySecretChat) {
+		const auto sent = SecretChats::Manager(&_owner->session()).DeleteMessages(
+			chatId,
+			ids);
+		Q_UNUSED(sent);
 	}
 	for (const auto &[peer, ids] : scheduledIdsByPeer) {
 		peer->session().api().request(MTPmessages_DeleteScheduledMessages(

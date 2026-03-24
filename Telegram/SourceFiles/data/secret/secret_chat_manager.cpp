@@ -327,6 +327,35 @@ void AppendSecretMessageEntities(
 	return body;
 }
 
+[[nodiscard]] QByteArray SerializeSecretServiceBody(
+		const SecretChatState &state,
+		uint64_t randomId,
+		uint32_t actionConstructor,
+		const QVector<uint64_t> &actionRandomIds) {
+	auto body = QByteArray();
+	AppendUInt32(body, kSecretOuterLayerConstructor);
+
+	auto randomBytes = QByteArray(kMinSecretRandomBytes, Qt::Uninitialized);
+	for (auto i = 0; i != randomBytes.size(); ++i) {
+		randomBytes[i] = char(base::RandomValue<uchar>());
+	}
+	AppendTLBytes(body, randomBytes);
+	AppendInt32(body, state.layer);
+	AppendInt32(body, SecretInSeqNo(state, state.incoming_sequence));
+	AppendInt32(body, SecretOutSeqNo(state, state.outgoing_sequence));
+	AppendUInt32(body, kSecretInnerServiceV17);
+	AppendUInt64(body, randomId);
+	AppendUInt32(body, actionConstructor);
+	if (!actionRandomIds.isEmpty()) {
+		AppendUInt32(body, kTlVectorConstructor);
+		AppendInt32(body, actionRandomIds.size());
+		for (const auto value : actionRandomIds) {
+			AppendUInt64(body, value);
+		}
+	}
+	return body;
+}
+
 [[nodiscard]] PeerId EnsureFakeSecretPeer(
 		not_null<Data::Session*> owner,
 		int64_t chatId,
@@ -1073,6 +1102,85 @@ bool SecretChatManager::ApplyServiceAction(const SecretParsedServiceMessage &mes
 	return false;
 }
 
+bool SecretChatManager::SendServiceMessage(
+		int64_t chatId,
+		uint32_t actionConstructor,
+		QVector<uint64_t> actionRandomIds,
+		Fn<void(SecretParsedServiceMessage)> done) {
+	auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		LOG(("1338 SecretChat: service send skipped, missing state chat_id=%1 action=%2")
+			.arg(chatId)
+			.arg(SecretServiceActionName(actionConstructor)));
+		return false;
+	}
+	if (!state->pending_random_power.isEmpty() || !state->key_fingerprint) {
+		LOG(("1338 SecretChat: service send skipped, secret chat not ready chat_id=%1 action=%2")
+			.arg(chatId)
+			.arg(SecretServiceActionName(actionConstructor)));
+		return false;
+	}
+	const auto randomId = base::RandomValue<uint64>();
+	const auto body = SerializeSecretServiceBody(
+		*state,
+		randomId,
+		actionConstructor,
+		actionRandomIds);
+	const auto payload = EncryptSecretChatPayloadMtproto2(*state, body);
+	if (!payload.has_value()) {
+		LOG(("1338 SecretChat: service encryption failed chat_id=%1 random_id=%2 action=%3")
+			.arg(chatId)
+			.arg(FormatUint64(randomId))
+			.arg(SecretServiceActionName(actionConstructor)));
+		return false;
+	}
+	++state->outgoing_sequence;
+	SaveState(*state);
+	const auto sentState = *state;
+	LOG(("1338 SecretChat: sending encrypted service chat_id=%1 random_id=%2 action=%3 out_seq=%4 count=%5")
+		.arg(chatId)
+		.arg(FormatUint64(randomId))
+		.arg(SecretServiceActionName(actionConstructor))
+		.arg(sentState.outgoing_sequence)
+		.arg(actionRandomIds.size()));
+	_session->api().request(MTPmessages_SendEncryptedService(
+		MTP_inputEncryptedChat(
+			MTP_int(chatId),
+			MTP_long(sentState.access_hash)),
+		MTP_long(randomId),
+		MTP_bytes(*payload)
+	)).done([=, actionRandomIds = std::move(actionRandomIds), done = std::move(done)](
+			const MTPmessages_SentEncryptedMessage &result) mutable {
+		auto message = SecretParsedServiceMessage{
+			.chatId = chatId,
+			.envelope = SecretParsedEnvelope{
+				.layer = sentState.layer,
+				.inSeqNo = SecretInSeqNo(sentState, sentState.incoming_sequence),
+				.outSeqNo = SecretOutSeqNo(sentState, sentState.outgoing_sequence - 1),
+				.outgoing = true,
+			},
+			.randomId = randomId,
+			.actionConstructor = actionConstructor,
+			.actionRandomIds = std::move(actionRandomIds),
+		};
+		result.match([&](const MTPDmessages_sentEncryptedMessage &data) {
+			message.envelope.date = data.vdate().v;
+		}, [&](const MTPDmessages_sentEncryptedFile &data) {
+			message.envelope.date = data.vdate().v;
+		});
+		if (done) {
+			done(std::move(message));
+		}
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1338 SecretChat: sendEncryptedService failed chat_id=%1 random_id=%2 action=%3 error=%4")
+			.arg(chatId)
+			.arg(FormatUint64(randomId))
+			.arg(SecretServiceActionName(actionConstructor))
+			.arg(error.type()));
+	}).send();
+	return true;
+}
+
 int SecretChatManager::RemoveMessagesByRandomIds(
 		int64_t chatId,
 		const QVector<uint64_t> &randomIds) {
@@ -1218,6 +1326,85 @@ bool SecretChatManager::SendText(
 			.arg(error.type()));
 	}).send();
 
+	return true;
+}
+
+bool SecretChatManager::DeleteMessages(
+		int64_t chatId,
+		const MessageIdsList &ids) {
+	if (ids.empty()) {
+		return false;
+	}
+	const auto &render = EnsureRenderState(chatId);
+	auto randomIds = QVector<uint64_t>();
+	auto seen = std::set<uint64_t>();
+	for (const auto &id : ids) {
+		if (const auto i = render.reverseRandomIds.find(id); i != end(render.reverseRandomIds)) {
+			if (seen.emplace(i->second).second) {
+				randomIds.push_back(i->second);
+			}
+		}
+	}
+	if (randomIds.isEmpty()) {
+		LOG(("1338 SecretChat: delete skipped, no mapped random ids chat_id=%1 count=%2")
+			.arg(chatId)
+			.arg(ids.size()));
+		return false;
+	}
+	return SendServiceMessage(
+		chatId,
+		kSecretActionDeleteMessages,
+		std::move(randomIds),
+		[this](SecretParsedServiceMessage message) {
+			ApplyServiceAction(message);
+		});
+}
+
+bool SecretChatManager::SendClearHistory(
+		int64_t chatId,
+		Fn<void(bool)> done) {
+	return SendServiceMessage(
+		chatId,
+		kSecretActionFlushHistory,
+		{},
+		[this, done = std::move(done)](SecretParsedServiceMessage message) mutable {
+			ApplyServiceAction(message);
+			if (done) {
+				done(true);
+			}
+		});
+}
+
+bool SecretChatManager::DiscardChatRemotely(
+		int64_t chatId,
+		Fn<void(bool)> done) {
+	if (!LoadState(chatId).has_value()) {
+		LOG(("1337 SecretChat: discard skipped, missing state chat_id=%1")
+			.arg(chatId));
+		return false;
+	}
+	using Flag = MTPmessages_DiscardEncryption::Flag;
+	LOG(("1337 SecretChat: sending discardEncryption chat_id=%1 delete_history=1")
+		.arg(chatId));
+	_session->api().request(MTPmessages_DiscardEncryption(
+		MTP_flags(Flag::f_delete_history),
+		MTP_int(chatId)
+	)).done([=](const MTPBool &) mutable {
+		LOG(("1337 SecretChat: discardEncryption done chat_id=%1")
+			.arg(chatId));
+		const auto removed = DeleteChat(chatId);
+		Q_UNUSED(removed);
+		if (done) {
+			done(true);
+		}
+	}).fail([=](const MTP::Error &error) mutable {
+		LOG(("1337 SecretChat: discardEncryption failed chat_id=%1 error=%2")
+			.arg(chatId)
+			.arg(error.type()));
+		if (done) {
+			done(false);
+		}
+	}).send();
 	return true;
 }
 

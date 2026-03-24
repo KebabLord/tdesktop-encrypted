@@ -266,6 +266,7 @@ private:
 	void fillSavedSublistActions();
 	void fillContextMenuActions();
 	void fillMonoforumPeerActions();
+	void addClearSecretChatHistory();
 	void addDeleteSecretChat();
 
 	void addHidePromotion();
@@ -1549,6 +1550,7 @@ void Filler::addVideoChat() {
 
 void Filler::fillContextMenuActions() {
 	if (_secret) {
+		addClearSecretChatHistory();
 		addDeleteSecretChat();
 		return;
 	}
@@ -1574,6 +1576,43 @@ void Filler::fillContextMenuActions() {
 	addDeleteTopic();
 }
 
+void Filler::addClearSecretChatHistory() {
+	if (!_secret) {
+		return;
+	}
+	const auto chatId = _secret->chatId();
+	const auto controller = _controller;
+	const auto title = Data::SecretChats::Manager(
+		&controller->session()).DisplayNameForChat(chatId);
+	_addAction({
+		.text = tr::lng_profile_clear_history(tr::now),
+		.handler = [=] {
+			if (controller->showFrozenError()) {
+				return;
+			}
+			controller->show(Ui::MakeConfirmBox({
+				.text = QString("Clear the secret chat history for \"%1\" on this device and the phone?")
+					.arg(title),
+				.confirmed = [=](Fn<void()> &&close) {
+					close();
+					const auto sent = Data::SecretChats::Manager(
+						&controller->session()).SendClearHistory(
+						chatId,
+						[=](bool ok) {
+							if (ok) {
+								controller->showToast(QString("Secret chat history cleared."));
+							}
+						});
+					Q_UNUSED(sent);
+				},
+				.confirmText = tr::lng_box_delete(),
+				.confirmStyle = &st::attentionBoxButton,
+			}), Ui::LayerOption::CloseOther);
+		},
+		.icon = &st::menuIconClear,
+	});
+}
+
 void Filler::addDeleteSecretChat() {
 	if (!_secret) {
 		return;
@@ -1585,14 +1624,23 @@ void Filler::addDeleteSecretChat() {
 	_addAction({
 		.text = QString("Delete Secret Chat"),
 		.handler = [=] {
+			if (controller->showFrozenError()) {
+				return;
+			}
 			controller->show(Ui::MakeConfirmBox({
-				.text = QString("Delete \"%1\" and its locally stored secret chat history from Telegram Desktop?")
+				.text = QString("Delete \"%1\" and its secret chat history on all connected devices?")
 					.arg(title),
 				.confirmed = [=](Fn<void()> &&close) {
 					close();
-					if (Data::SecretChats::Manager(&controller->session()).DeleteChat(chatId)) {
-						controller->showToast(QString("Secret chat deleted."));
-					}
+					const auto sent = Data::SecretChats::Manager(
+						&controller->session()).DiscardChatRemotely(
+						chatId,
+						[=](bool ok) {
+							if (ok) {
+								controller->showToast(QString("Secret chat deleted."));
+							}
+						});
+					Q_UNUSED(sent);
 				},
 				.confirmText = tr::lng_box_delete(),
 				.confirmStyle = &st::attentionBoxButton,

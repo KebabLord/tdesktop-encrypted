@@ -21,9 +21,9 @@ The source code is published under GPLv3 with OpenSSL exception, the license is 
  - [x] Support text formatting, replies, contact mapping.
  - [x] Support read receipts, typing events.
  - [x] Initiate secret chat from client.
+ - [x] Handle delete messages, chat clear.
  - [ ] Support stickers, documents, media.
  - [ ] Support forwarding a message into secret chat.
- - [ ] Handle delete message & chat events.
  - [ ] Handle key rotation.
  - [ ] Handle notifications.
  - [ ] Handle periodic chat clear. 
