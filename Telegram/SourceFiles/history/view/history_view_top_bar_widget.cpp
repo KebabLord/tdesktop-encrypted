@@ -1856,8 +1856,12 @@ void TopBarWidget::updateOnlineDisplay() {
 		const auto &manager = Data::SecretChats::Manager(&session());
 		const auto now = base::unixtime::now();
 		const auto user = manager.DisplayUserForChat(secret->chatId());
-		const auto text = manager.DisplayStatusForChat(secret->chatId());
-		const auto typing = (text == tr::lng_typing(tr::now));
+		const auto typing = manager.IsChatReady(secret->chatId())
+			&& (manager.DisplayStatusForChat(secret->chatId())
+				== tr::lng_typing(tr::now));
+		const auto text = user
+			? Data::OnlineText(user, now)
+			: QString("Secret chat");
 		const auto titlePeerTextOnline = user
 			? Data::OnlineTextActive(user, now)
 			: false;
@@ -1984,6 +1988,13 @@ void TopBarWidget::updateOnlineDisplay() {
 void TopBarWidget::updateOnlineDisplayTimer() {
 	const auto peer = _activeChat.key.peer();
 	if (const auto secret = SecretChatEntryFromState(session(), _activeChat)) {
+		if (const auto state = Data::SecretChats::Manager(&session()).LoadState(
+				secret->chatId());
+			!state.has_value()
+				|| !state->pending_random_power.isEmpty()
+				|| !state->key_fingerprint) {
+			return;
+		}
 		if (Data::SecretChats::Manager(&session()).DisplayStatusForChat(
 				secret->chatId()) == tr::lng_typing(tr::now)) {
 			updateOnlineDisplayIn(crl::time(33));

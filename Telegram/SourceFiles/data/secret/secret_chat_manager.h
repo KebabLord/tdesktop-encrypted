@@ -55,6 +55,7 @@ public:
 	[[nodiscard]] Dialogs::Entry *EntryForChat(int64_t chatId) const;
 	[[nodiscard]] not_null<History*> ViewHistoryForChat(int64_t chatId);
 	[[nodiscard]] const std::vector<FullMsgId> &ViewMessageIds(int64_t chatId);
+	[[nodiscard]] std::optional<int64_t> ChatIdForUser(UserId userId) const;
 	[[nodiscard]] std::optional<int64_t> ChatIdForHistory(
 		not_null<const History*> history) const;
 	[[nodiscard]] std::optional<int64_t> ChatIdForPeer(PeerId peerId) const;
@@ -68,8 +69,15 @@ public:
 	[[nodiscard]] UserData *DisplayUserForChat(int64_t chatId) const;
 	[[nodiscard]] QString DisplayNameForChat(int64_t chatId) const;
 	[[nodiscard]] QString DisplayStatusForChat(int64_t chatId) const;
+	[[nodiscard]] QString WaitingStatusForChat(int64_t chatId) const;
+	[[nodiscard]] bool IsChatReady(int64_t chatId) const;
+	[[nodiscard]] bool StartChat(
+		not_null<UserData*> user,
+		Fn<void(int64_t)> onReady = nullptr);
 	void UpdateTyping(int64_t chatId);
 	void CancelTyping(int64_t chatId);
+	void HandleEncryptedChatWaiting(const MTPEncryptedChat &chat);
+	void HandleEncryptedChatEstablished(const MTPEncryptedChat &chat);
 	void HandleEncryptedTyping(int64_t chatId);
 	void HandleEncryptedMessagesRead(int64_t chatId, TimeId maxDate);
 	void MarkReadTill(int64_t chatId, TimeId maxDate);
