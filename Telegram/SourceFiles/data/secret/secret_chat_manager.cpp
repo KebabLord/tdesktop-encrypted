@@ -455,7 +455,7 @@ auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
 	state->history->getReadyFor(ShowAtTheEndMsgId);
 	if (const auto i = _messages.find(chatId); i != _messages.end()) {
 		for (const auto &message : i.value()) {
-			AppendRenderedMessage(*state, message);
+			AppendRenderedMessage(*state, message, true);
 		}
 	}
 	auto raw = state.get();
@@ -465,7 +465,8 @@ auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
 
 void SecretChatManager::AppendRenderedMessage(
 		RenderState &state,
-		const SecretParsedMessage &message) {
+		const SecretParsedMessage &message,
+		bool restored) {
 	const auto &envelope = MessageEnvelope(message);
 	const auto chatId = std::visit([](const auto &value) {
 		return value.chatId;
@@ -474,6 +475,12 @@ void SecretChatManager::AppendRenderedMessage(
 		const auto loaded = DisplayUserForChat(chatId);
 		return loaded ? loaded->id : state.peerId;
 	}();
+	const auto activityUser = restored && !envelope.outgoing
+		? DisplayUserForChat(chatId)
+		: nullptr;
+	const auto previousLastseen = activityUser
+		? std::optional(activityUser->lastseen())
+		: std::nullopt;
 	auto fields = HistoryItemCommonFields{
 		.id = state.history->nextNonHistoryEntryId(),
 		.flags = (MessageFlag::HasFromId
@@ -495,6 +502,13 @@ void SecretChatManager::AppendRenderedMessage(
 		std::move(fields),
 		RenderMessageText(message),
 		MTP_messageMediaEmpty());
+	if (activityUser && previousLastseen
+		&& activityUser->updateLastseen(*previousLastseen)) {
+		_session->data().maybeStopWatchForOffline(activityUser);
+		_session->changes().peerUpdated(
+			activityUser,
+			Data::PeerUpdate::Flag::OnlineStatus);
+	}
 	state.ids.push_back(item->fullId());
 	if (const auto randomId = MessageRandomId(message)) {
 		state.randomIds.emplace(randomId, item->fullId());

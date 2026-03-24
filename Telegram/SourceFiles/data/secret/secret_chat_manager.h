@@ -84,7 +84,10 @@ private:
 	void EnsureEntryForChat(const SecretChatDescriptor &descriptor);
 	void UpsertKnownChat(const SecretChatState &state);
 	[[nodiscard]] RenderState &EnsureRenderState(int64_t chatId);
-	void AppendRenderedMessage(RenderState &state, const SecretParsedMessage &message);
+	void AppendRenderedMessage(
+		RenderState &state,
+		const SecretParsedMessage &message,
+		bool restored = false);
 	void AdvanceIncomingState(const SecretParsedMessage &message);
 	void RefreshChatListEntry(not_null<Dialogs::SecretChatEntry*> entry);
 	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);
