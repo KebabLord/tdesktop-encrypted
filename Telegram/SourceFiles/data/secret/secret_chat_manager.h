@@ -68,6 +68,8 @@ public:
 	[[nodiscard]] UserData *DisplayUserForChat(int64_t chatId) const;
 	[[nodiscard]] QString DisplayNameForChat(int64_t chatId) const;
 	[[nodiscard]] QString DisplayStatusForChat(int64_t chatId) const;
+	void UpdateTyping(int64_t chatId);
+	void CancelTyping(int64_t chatId);
 	void HandleEncryptedTyping(int64_t chatId);
 	void HandleEncryptedMessagesRead(int64_t chatId, TimeId maxDate);
 	void MarkReadTill(int64_t chatId, TimeId maxDate);
@@ -97,6 +99,9 @@ private:
 	std::map<int64_t, std::unique_ptr<RenderState>> _rendered;
 	std::map<int64_t, std::unique_ptr<base::Timer>> _typingTimers;
 	std::map<int64_t, crl::time> _typingUntil;
+	std::map<int64_t, std::unique_ptr<base::Timer>> _outgoingTypingTimers;
+	std::map<int64_t, crl::time> _outgoingTypingUpdated;
+	std::map<int64_t, bool> _outgoingTypingActive;
 	std::map<int64_t, TimeId> _readTillSent;
 	rpl::event_stream<int64_t> _messageUpdates;
 	rpl::event_stream<int64_t> _presentationUpdates;

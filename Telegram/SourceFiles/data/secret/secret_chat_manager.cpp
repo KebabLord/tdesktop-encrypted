@@ -34,6 +34,8 @@ namespace Data::SecretChats {
 namespace {
 
 constexpr auto kSecretTypingTimeout = 6 * crl::time(1000);
+constexpr auto kSecretTypingCancelTimeout = 5 * crl::time(1000);
+constexpr auto kSecretSendMyTypingInterval = 5 * crl::time(1000);
 
 } // namespace
 
@@ -1061,6 +1063,75 @@ QString SecretChatManager::DisplayStatusForChat(int64_t chatId) const {
 	}
 	return QString("Secret chat");
 }
+
+void SecretChatManager::UpdateTyping(int64_t chatId) {
+	const auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		return;
+	}
+	auto &timer = _outgoingTypingTimers[chatId];
+	if (!timer) {
+		timer = std::make_unique<base::Timer>();
+		timer->setCallback([=, this] {
+			CancelTyping(chatId);
+		});
+	}
+	timer->callOnce(kSecretTypingCancelTimeout);
+	_outgoingTypingActive[chatId] = true;
+
+	const auto now = crl::now();
+	if (const auto i = _outgoingTypingUpdated.find(chatId);
+			(i != end(_outgoingTypingUpdated)) && (i->second > now)) {
+		return;
+	}
+	_outgoingTypingUpdated[chatId] = now + kSecretSendMyTypingInterval;
+	LOG(("1336 SecretChat: sending setEncryptedTyping chat_id=%1 typing=1")
+		.arg(chatId));
+	_session->api().request(MTPmessages_SetEncryptedTyping(
+		MTP_inputEncryptedChat(
+			MTP_int(chatId),
+			MTP_long(state->access_hash)),
+		MTP_bool(true)
+	)).done([=](const MTPBool &) {
+		LOG(("1336 SecretChat: setEncryptedTyping done chat_id=%1 typing=1")
+			.arg(chatId));
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1336 SecretChat: setEncryptedTyping failed chat_id=%1 typing=1 error=%2")
+			.arg(chatId)
+			.arg(error.type()));
+	}).send();
+}
+
+void SecretChatManager::CancelTyping(int64_t chatId) {
+	if (const auto i = _outgoingTypingTimers.find(chatId); i != end(_outgoingTypingTimers)) {
+		i->second->cancel();
+	}
+	const auto active = _outgoingTypingActive.find(chatId);
+	if ((active == end(_outgoingTypingActive)) || !active->second) {
+		return;
+	}
+	active->second = false;
+	const auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		return;
+	}
+	LOG(("1336 SecretChat: sending setEncryptedTyping chat_id=%1 typing=0")
+		.arg(chatId));
+	_session->api().request(MTPmessages_SetEncryptedTyping(
+		MTP_inputEncryptedChat(
+			MTP_int(chatId),
+			MTP_long(state->access_hash)),
+		MTP_bool(false)
+	)).done([=](const MTPBool &) {
+		LOG(("1336 SecretChat: setEncryptedTyping done chat_id=%1 typing=0")
+			.arg(chatId));
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1336 SecretChat: setEncryptedTyping failed chat_id=%1 typing=0 error=%2")
+			.arg(chatId)
+			.arg(error.type()));
+	}).send();
+}
+
 void SecretChatManager::HandleEncryptedTyping(int64_t chatId) {
 	auto &timer = _typingTimers[chatId];
 	if (!timer) {

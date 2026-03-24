@@ -1910,14 +1910,17 @@ void HistoryWidget::fieldChanged() {
 	InvokeQueued(this, [=] {
 		updateInlineBotQuery();
 		if (_history
-			&& !shownSecretChatId()
 			&& !_inlineBot
 			&& !_editMsgId
 			&& (!_autocomplete || !_autocomplete->stickersEmoji())
 			&& updateTyping) {
-			session().sendProgressManager().update(
-				_history,
-				Api::SendProgressType::Typing);
+			if (const auto chatId = shownSecretChatId()) {
+				Data::SecretChats::Manager(&session()).UpdateTyping(*chatId);
+			} else {
+				session().sendProgressManager().update(
+					_history,
+					Api::SendProgressType::Typing);
+			}
 		}
 	});
 
@@ -2578,10 +2581,14 @@ void HistoryWidget::showHistory(
 			session().data().hideShownSpoilers();
 			_composeSearch = nullptr;
 		}
-		session().sendProgressManager().update(
-			_history,
-			Api::SendProgressType::Typing,
-			-1);
+		if (const auto chatId = shownSecretChatId()) {
+			Data::SecretChats::Manager(&session()).CancelTyping(*chatId);
+		} else {
+			session().sendProgressManager().update(
+				_history,
+				Api::SendProgressType::Typing,
+				-1);
+		}
 		session().data().histories().sendPendingReadInbox(_history);
 		session().sendProgressManager().cancelTyping(_history);
 	}
@@ -4936,6 +4943,7 @@ bool HistoryWidget::sendSecretText(Api::SendOptions options) {
 			replyTo())) {
 		return true;
 	}
+	Data::SecretChats::Manager(&session()).CancelTyping(*chatId);
 
 	clearFieldText();
 	cancelReply(false);
