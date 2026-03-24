@@ -605,7 +605,33 @@ void TopBarWidget::paintTopBar(Painter &p) {
 				textWidth));
 
 		p.setFont(st::dialogsTextFont);
-		paintStatus(p, statusleft, statustop, statuswidth, width());
+		const auto now = crl::now();
+		const auto typing = (manager.DisplayStatusForChat(secret->chatId())
+			== tr::lng_typing(tr::now));
+		if (typing) {
+			if (!_secretTypingAnimation) {
+				_secretTypingAnimation.start(Api::SendProgressType::Typing);
+			}
+			if (!paintConnectingState(p, statusleft, statustop, width())) {
+				const auto animationWidth = _secretTypingAnimation.width();
+				_secretTypingAnimation.paint(
+					p,
+					st::historyStatusFgTyping,
+					statusleft,
+					statustop + st::normalFont->ascent,
+					width(),
+					now);
+				p.setPen(st::historyStatusFgTyping);
+				p.drawTextLeft(
+					statusleft + animationWidth,
+					statustop,
+					width(),
+					tr::lng_typing(tr::now));
+			}
+		} else {
+			_secretTypingAnimation.tryToFinish();
+			paintStatus(p, statusleft, statustop, statuswidth, width());
+		}
 		return;
 	}
 	const auto peer = _activeChat.key.owningHistory()
@@ -918,17 +944,16 @@ void TopBarWidget::setActiveChat(
 		_activeChat = activeChat;
 		return;
 	}
+	const auto keyChanged = (_activeChat.key != activeChat.key);
 	const auto topicChanged = (_activeChat.key.topic()
 		!= activeChat.key.topic());
-	const auto peerChanged = (_activeChat.key.history()
-		!= activeChat.key.history());
 
 	_activeChat = activeChat;
 	_titlePeerText.clear();
 	_back->clearState();
 	update();
 
-	if (peerChanged || topicChanged) {
+	if (keyChanged || topicChanged) {
 		_titleBadge.unload();
 		_titleNameVersion = 0;
 		_emojiInteractionSeen = nullptr;
@@ -961,6 +986,15 @@ void TopBarWidget::setActiveChat(
 						Data::kStoriesAlbumIdArchive);
 				}
 			}
+		}
+
+		if (const auto secret = SecretChatEntryFromState(session(), _activeChat)) {
+			Data::SecretChats::Manager(&session()).presentationUpdates(
+			) | rpl::filter([=](int64_t updatedChatId) {
+				return (updatedChatId == secret->chatId());
+			}) | rpl::on_next([=] {
+				updateOnlineDisplay();
+			}, _activeChatLifetime);
 		}
 
 		if (const auto history = _activeChat.key.history()) {
@@ -1823,14 +1857,22 @@ void TopBarWidget::updateOnlineDisplay() {
 		const auto now = base::unixtime::now();
 		const auto user = manager.DisplayUserForChat(secret->chatId());
 		const auto text = manager.DisplayStatusForChat(secret->chatId());
+		const auto typing = (text == tr::lng_typing(tr::now));
 		const auto titlePeerTextOnline = user
 			? Data::OnlineTextActive(user, now)
 			: false;
+		if (typing && !_secretTypingAnimation) {
+			_secretTypingAnimation.start(Api::SendProgressType::Typing);
+		} else if (!typing && _secretTypingAnimation) {
+			_secretTypingAnimation.tryToFinish();
+		}
 		if (_titlePeerText.toString() != text
 			|| _titlePeerTextOnline != titlePeerTextOnline) {
 			_titlePeerText.setText(st::dialogsTextStyle, text);
 			_titlePeerTextOnline = titlePeerTextOnline;
 			updateMembersShowArea();
+			update();
+		} else if (typing) {
 			update();
 		}
 		updateOnlineDisplayTimer();
@@ -1942,6 +1984,11 @@ void TopBarWidget::updateOnlineDisplay() {
 void TopBarWidget::updateOnlineDisplayTimer() {
 	const auto peer = _activeChat.key.peer();
 	if (const auto secret = SecretChatEntryFromState(session(), _activeChat)) {
+		if (Data::SecretChats::Manager(&session()).DisplayStatusForChat(
+				secret->chatId()) == tr::lng_typing(tr::now)) {
+			updateOnlineDisplayIn(crl::time(33));
+			return;
+		}
 		if (const auto user = Data::SecretChats::Manager(&session())
 				.DisplayUserForChat(secret->chatId())) {
 			const auto timeout = Data::OnlineChangeTimeout(
