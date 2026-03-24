@@ -2101,7 +2101,10 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 			secretManager.HandleEncryptedChatEstablished(chat);
 		} break;
 
-		case mtpc_encryptedChatDiscarded:
+		case mtpc_encryptedChatDiscarded: {
+			secretManager.HandleEncryptedChatDiscarded(chat);
+		} break;
+
 		case mtpc_encryptedChatEmpty: {
 			secretManager.LogEncryptionChat(chat, "updateEncryption");
 		} break;

@@ -8,6 +8,59 @@
 namespace Data::SecretChats {
 namespace {
 
+constexpr auto kSecretActionReadMessages = uint32_t(0x0c4f40be);
+constexpr auto kSecretActionDeleteMessages = uint32_t(0x65614304);
+constexpr auto kSecretActionScreenshotMessages = uint32_t(0x8ac1f475);
+
+std::optional<QVector<uint64_t>> ParseSecretRandomIdVector(
+		int64_t chatId,
+		const char *tag,
+		SecretTlReader &reader,
+		const QString &name) {
+	auto result = QVector<uint64_t>();
+	const auto vectorCtor = reader.ReadUInt32();
+	const auto count = reader.ReadInt32();
+	if (!vectorCtor.has_value() || !count.has_value()) {
+		LOG(("1335 SecretChat: %1 %2 vector truncated chat_id=%3 offset=%4 limit=%5")
+			.arg(QString::fromLatin1(tag))
+			.arg(name)
+			.arg(chatId)
+			.arg(reader.offset)
+			.arg(reader.limit));
+		return std::nullopt;
+	}
+	if ((*vectorCtor != kTlVectorConstructor) || (*count < 0)) {
+		LOG(("1335 SecretChat: %1 invalid %2 vector chat_id=%3 ctor=%4 count=%5")
+			.arg(QString::fromLatin1(tag))
+			.arg(name)
+			.arg(chatId)
+			.arg(FormatUint32Hex(*vectorCtor))
+			.arg(*count));
+		return std::nullopt;
+	}
+	result.reserve(*count);
+	for (auto i = 0; i != *count; ++i) {
+		const auto randomId = reader.ReadUInt64();
+		if (!randomId.has_value()) {
+			LOG(("1335 SecretChat: %1 %2 random_id truncated chat_id=%3 index=%4 offset=%5 limit=%6")
+				.arg(QString::fromLatin1(tag))
+				.arg(name)
+				.arg(chatId)
+				.arg(i)
+				.arg(reader.offset)
+				.arg(reader.limit));
+			return std::nullopt;
+		}
+		result.push_back(*randomId);
+	}
+	LOG(("1335 SecretChat: %1 %2 random_ids chat_id=%3 count=%4")
+		.arg(QString::fromLatin1(tag))
+		.arg(name)
+		.arg(chatId)
+		.arg(result.size()));
+	return result;
+}
+
 std::optional<QVector<SecretParsedEntity>> ParseSecretMessageEntities(
 		int64_t chatId,
 		const char *tag,
@@ -365,11 +418,29 @@ std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 			.arg(FormatUint64(*randomId))
 			.arg(FormatUint32Hex(*actionConstructor)));
 
+		auto actionRandomIds = QVector<uint64_t>();
+		switch (*actionConstructor) {
+		case kSecretActionReadMessages:
+		case kSecretActionDeleteMessages:
+		case kSecretActionScreenshotMessages: {
+			const auto parsedRandomIds = ParseSecretRandomIdVector(
+				chatId,
+				tag,
+				reader,
+				SecretServiceActionName(*actionConstructor));
+			if (!parsedRandomIds.has_value()) {
+				return std::nullopt;
+			}
+			actionRandomIds = *parsedRandomIds;
+		} break;
+		}
+
 		return SecretParsedServiceMessage{
 			.chatId = chatId,
 			.envelope = envelope,
 			.randomId = *randomId,
 			.actionConstructor = *actionConstructor,
+			.actionRandomIds = std::move(actionRandomIds),
 		};
 	}
 

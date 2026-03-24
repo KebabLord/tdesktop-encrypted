@@ -49,6 +49,7 @@ struct SecretParsedServiceMessage {
 	SecretParsedEnvelope envelope;
 	uint64_t randomId = 0;
 	uint32_t actionConstructor = 0;
+	QVector<uint64_t> actionRandomIds;
 };
 
 struct SecretParsedUnsupportedMessage {

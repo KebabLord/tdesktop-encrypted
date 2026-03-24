@@ -78,6 +78,7 @@ public:
 	void CancelTyping(int64_t chatId);
 	void HandleEncryptedChatWaiting(const MTPEncryptedChat &chat);
 	void HandleEncryptedChatEstablished(const MTPEncryptedChat &chat);
+	void HandleEncryptedChatDiscarded(const MTPEncryptedChat &chat);
 	void HandleEncryptedTyping(int64_t chatId);
 	void HandleEncryptedMessagesRead(int64_t chatId, TimeId maxDate);
 	void MarkReadTill(int64_t chatId, TimeId maxDate);
@@ -96,9 +97,14 @@ private:
 		RenderState &state,
 		const SecretParsedMessage &message,
 		bool restored = false);
+	void RemoveRenderedMessageAt(RenderState &state, int index);
+	void DestroyRenderedMessages(RenderState &state);
 	void AdvanceIncomingState(const SecretParsedMessage &message);
 	void RefreshChatListEntry(not_null<Dialogs::SecretChatEntry*> entry);
 	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);
+	bool ApplyServiceAction(const SecretParsedServiceMessage &message);
+	int RemoveMessagesByRandomIds(int64_t chatId, const QVector<uint64_t> &randomIds);
+	bool ClearHistory(int64_t chatId);
 	void RefreshKnownChats();
 	void RefreshPresentation(int64_t chatId);
 	void ClearTyping(int64_t chatId);

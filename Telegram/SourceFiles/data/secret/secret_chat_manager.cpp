@@ -28,6 +28,7 @@
 #include <lang_auto.h>
 
 #include <map>
+#include <set>
 
 namespace Data::SecretChats {
 
@@ -37,6 +38,8 @@ constexpr auto kSecretTypingTimeout = 6 * crl::time(1000);
 constexpr auto kSecretTypingCancelTimeout = 5 * crl::time(1000);
 constexpr auto kSecretSendMyTypingInterval = 5 * crl::time(1000);
 constexpr auto kSecretLayer = 73;
+constexpr auto kSecretActionDeleteMessages = uint32_t(0x65614304);
+constexpr auto kSecretActionFlushHistory = uint32_t(0x6719e45c);
 
 } // namespace
 
@@ -523,6 +526,35 @@ void SecretChatManager::AppendRenderedMessage(
 		Data::HistoryUpdate::Flag::ClientSideMessages);
 }
 
+void SecretChatManager::RemoveRenderedMessageAt(
+		SecretChatManager::RenderState &state,
+		int index) {
+	if ((index < 0) || (index >= int(state.ids.size()))) {
+		return;
+	}
+	const auto fullId = state.ids[index];
+	if (const auto i = state.reverseRandomIds.find(fullId); i != end(state.reverseRandomIds)) {
+		state.randomIds.erase(i->second);
+		state.reverseRandomIds.erase(i);
+	}
+	state.ids.erase(begin(state.ids) + index);
+	if (const auto item = _session->data().message(fullId)) {
+		item->destroy();
+	}
+}
+
+void SecretChatManager::DestroyRenderedMessages(
+		SecretChatManager::RenderState &state) {
+	for (const auto &fullId : state.ids) {
+		if (const auto item = _session->data().message(fullId)) {
+			item->destroy();
+		}
+	}
+	state.ids.clear();
+	state.randomIds.clear();
+	state.reverseRandomIds.clear();
+}
+
 // Update the persisted incoming sequence counters from an inbound message.
 void SecretChatManager::AdvanceIncomingState(const SecretParsedMessage &message) {
 	const auto &envelope = MessageEnvelope(message);
@@ -622,6 +654,16 @@ void SecretChatManager::HandleEncryptedMessage(
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId));
 		return;
+	}
+
+	if (const auto service = std::get_if<SecretParsedServiceMessage>(&*parsed)) {
+		if (ApplyServiceAction(*service)) {
+			if (!MessageEnvelope(*parsed).outgoing) {
+				ClearTyping(chatId);
+			}
+			AdvanceIncomingState(*parsed);
+			return;
+		}
 	}
 
 	StoreParsedMessage(chatId, *parsed);
@@ -1006,6 +1048,84 @@ void SecretChatManager::StoreParsedMessage(
 	_messageUpdates.fire_copy(chatId);
 }
 
+bool SecretChatManager::ApplyServiceAction(const SecretParsedServiceMessage &message) {
+	switch (message.actionConstructor) {
+	case kSecretActionDeleteMessages: {
+		const auto removed = RemoveMessagesByRandomIds(
+			message.chatId,
+			message.actionRandomIds);
+		LOG(("1335 SecretChat: applied delete_messages chat_id=%1 service_random_id=%2 removed=%3 requested=%4")
+			.arg(message.chatId)
+			.arg(FormatUint64(message.randomId))
+			.arg(removed)
+			.arg(message.actionRandomIds.size()));
+		return true;
+	}
+	case kSecretActionFlushHistory: {
+		const auto cleared = ClearHistory(message.chatId);
+		LOG(("1335 SecretChat: applied flush_history chat_id=%1 service_random_id=%2 had_messages=%3")
+			.arg(message.chatId)
+			.arg(FormatUint64(message.randomId))
+			.arg(cleared ? 1 : 0));
+		return true;
+	}
+	}
+	return false;
+}
+
+int SecretChatManager::RemoveMessagesByRandomIds(
+		int64_t chatId,
+		const QVector<uint64_t> &randomIds) {
+	if (randomIds.isEmpty()) {
+		return 0;
+	}
+	auto i = _messages.find(chatId);
+	if (i == _messages.end()) {
+		return 0;
+	}
+	const auto targets = std::set<uint64_t>(
+		randomIds.begin(),
+		randomIds.end());
+	auto removed = 0;
+	const auto rendered = _rendered.find(chatId);
+	auto &list = i.value();
+	for (auto index = list.size() - 1; index >= 0; --index) {
+		const auto randomId = MessageRandomId(list[index]);
+		if (!randomId || !targets.contains(randomId)) {
+			continue;
+		}
+		if (rendered != _rendered.end()) {
+			RemoveRenderedMessageAt(*rendered->second, index);
+		}
+		list.removeAt(index);
+		++removed;
+	}
+	if (!removed) {
+		return 0;
+	}
+	SaveSecretChatMessages(_session, chatId, list);
+	if (const auto entry = _entries.find(chatId); entry != end(_entries)) {
+		RefreshChatListEntry(entry->second.get());
+	}
+	_messageUpdates.fire_copy(chatId);
+	return removed;
+}
+
+bool SecretChatManager::ClearHistory(int64_t chatId) {
+	const auto i = _messages.find(chatId);
+	const auto hadMessages = (i != _messages.end()) && !i.value().isEmpty();
+	_messages.remove(chatId);
+	SaveSecretChatMessages(_session, chatId, {});
+	if (const auto rendered = _rendered.find(chatId); rendered != end(_rendered)) {
+		DestroyRenderedMessages(*rendered->second);
+	}
+	if (const auto entry = _entries.find(chatId); entry != end(_entries)) {
+		RefreshChatListEntry(entry->second.get());
+	}
+	_messageUpdates.fire_copy(chatId);
+	return hadMessages;
+}
+
 bool SecretChatManager::SendText(
 		int64_t chatId,
 		const ::TextWithEntities &textWithEntities,
@@ -1212,6 +1332,9 @@ bool SecretChatManager::StartChat(
 
 bool SecretChatManager::DeleteChat(int64_t chatId) {
 	const auto removed = DeleteSecretChat(_session, chatId);
+	if (const auto rendered = _rendered.find(chatId); rendered != end(_rendered)) {
+		DestroyRenderedMessages(*rendered->second);
+	}
 	_states.erase(chatId);
 	_messages.remove(chatId);
 	_rendered.erase(chatId);
@@ -1231,6 +1354,19 @@ bool SecretChatManager::DeleteChat(int64_t chatId) {
 	LOG(("1337 SecretChat: manager deleted secret chat chat_id=%1")
 		.arg(chatId));
 	return removed;
+}
+
+void SecretChatManager::HandleEncryptedChatDiscarded(const MTPEncryptedChat &chat) {
+	if (chat.type() != mtpc_encryptedChatDiscarded) {
+		return;
+	}
+	const auto &discarded = chat.c_encryptedChatDiscarded();
+	const auto chatId = int64_t(discarded.vid().v);
+	LOG(("1337 SecretChat: handling encryptedChatDiscarded id=%1 history_deleted=%2")
+		.arg(chatId)
+		.arg(discarded.is_history_deleted() ? 1 : 0));
+	const auto removed = DeleteChat(chatId);
+	Q_UNUSED(removed);
 }
 
 const QVector<SecretParsedMessage> &SecretChatManager::Messages(int64_t chatId) const {
